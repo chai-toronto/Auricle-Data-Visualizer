@@ -74,8 +74,11 @@ class SpectrogramWidget(QWidget):
         self.db_ref = 1e-10
         self.vmin = -80
         self.vmax = 0
-        
-        # Channel filter: None means all channels
+
+        # Box-based configuration: one plot per Time Series box.
+        self.boxes: List = []
+
+        # Legacy channel filter (kept for API compatibility).
         self.active_channels: Optional[List[int]] = None
         self._active_channel_indices: List[int] = []
         self._plot_containers: List[QWidget] = []  # container widgets wrapping each plot
@@ -202,85 +205,136 @@ class SpectrogramWidget(QWidget):
     
     def set_data(self, sensor_data: SensorData):
         """
-        Store reference to sensor data and compute spectrogram.
-        
-        Args:
-            sensor_data: SensorData object
+        Store reference to sensor data.
+
+        The actual plot layout is driven by :meth:`set_boxes`.  This method
+        is kept for callers that only need to update the underlying data.
         """
         self.sensor_data = sensor_data
+        if self.boxes:
+            self.set_boxes(self.boxes)
+        else:
+            self._build_legacy_channel_plots()
+
+    def set_boxes(self, boxes: list):
+        """
+        Create one STFT plot per box, using each box's selected STFT channel.
+
+        Args:
+            boxes: List of PlotBox widgets from the Time Series tab.
+        """
+        self.boxes = boxes
         self.clear_plots()
-        
-        channels = self._get_channels_to_show()
-        self._active_channel_indices = channels
-        
-        # Create a plot for each active channel
-        for pos, ch_idx in enumerate(channels):
-            # Create plot widget
+
+        if not boxes or self.sensor_data is None:
+            return
+
+        for pos, box in enumerate(boxes):
             plot_widget = pg.PlotWidget()
             plot_widget.setBackground('w')
-            plot_widget.setLabel('left', f'{sensor_data.channel_names[ch_idx]} - Frequency', units='Hz')
-            
-            # Only show x-axis label on last plot
-            if pos == len(channels) - 1:
+            plot_widget.setLabel('left', 'Frequency', units='Hz')
+
+            if pos == len(boxes) - 1:
                 plot_widget.setLabel('bottom', 'Time', units='s')
             else:
                 plot_widget.getAxis('bottom').setStyle(showValues=False)
-            
+
             plot_widget.setMinimumHeight(200)
             plot_widget.setMenuEnabled(False)
-            
-            # Create image item for this channel
+
             image_item = pg.ImageItem()
             plot_widget.addItem(image_item)
-            
-            # Create color bar
-            color_bar = pg.ColorBarItem(
-                values=(0, 1),
-                colorMap='viridis'
-            )
-            # Position color bar on the right side
+
+            color_bar = pg.ColorBarItem(values=(0, 1), colorMap='viridis')
             color_bar.setImageItem(image_item)
-            
-            # Store references
+
             self.plot_widgets.append(plot_widget)
             self.image_items.append(image_item)
             self.color_bars.append(color_bar)
 
-            # Wrap in a container with a Y-range control header
             container = self._create_plot_container(plot_widget)
             self._plot_containers.append(container)
 
-            # Add container and a resize handle to layout
             self.plots_layout.addWidget(container)
             self.plots_layout.addWidget(ResizeHandle(container))
-        
-        # Link x-axes of all plots
+
         if len(self.plot_widgets) > 1:
             for i in range(1, len(self.plot_widgets)):
                 self.plot_widgets[i].setXLink(self.plot_widgets[0])
-        
-        # Connect to view range changes on the first plot
+
         if self.plot_widgets:
             view_box = self.plot_widgets[0].getViewBox()
             view_box.sigRangeChanged.connect(self.on_view_range_changed)
-        
-        # Populate channel dropdown for playback selection
-        if self.channel_combo is not None:
-            self.channel_combo.clear()
-            if hasattr(sensor_data, 'channel_names') and sensor_data.channel_names:
-                for i, channel_name in enumerate(sensor_data.channel_names):
-                    self.channel_combo.addItem(f"Channel {i}: {channel_name}", i)
-            else:
-                for i in range(sensor_data.n_channels):
-                    self.channel_combo.addItem(f"Channel {i}", i)
-            if self.channel_combo.count() > 0:
-                self.channel_combo.setCurrentIndex(0)
-        
-        # Initialize blue selection region at 0-10% of data duration
-        self.set_region(0, sensor_data.duration * 0.1)
-        
-        # Compute spectrograms
+
+        self._populate_playback_channel_combo()
+        self.set_region(0, self.sensor_data.duration * 0.1)
         self.update_all_spectrograms()
+
+    def _build_legacy_channel_plots(self):
+        """Fallback layout when no boxes are available."""
+        self.clear_plots()
+        if self.sensor_data is None:
+            return
+
+        channels = self._get_channels_to_show()
+        self._active_channel_indices = channels
+
+        for pos, ch_idx in enumerate(channels):
+            plot_widget = pg.PlotWidget()
+            plot_widget.setBackground('w')
+            plot_widget.setLabel(
+                'left', f'{self.sensor_data.channel_names[ch_idx]} - Frequency', units='Hz'
+            )
+
+            if pos == len(channels) - 1:
+                plot_widget.setLabel('bottom', 'Time', units='s')
+            else:
+                plot_widget.getAxis('bottom').setStyle(showValues=False)
+
+            plot_widget.setMinimumHeight(200)
+            plot_widget.setMenuEnabled(False)
+
+            image_item = pg.ImageItem()
+            plot_widget.addItem(image_item)
+
+            color_bar = pg.ColorBarItem(values=(0, 1), colorMap='viridis')
+            color_bar.setImageItem(image_item)
+
+            self.plot_widgets.append(plot_widget)
+            self.image_items.append(image_item)
+            self.color_bars.append(color_bar)
+
+            container = self._create_plot_container(plot_widget)
+            self._plot_containers.append(container)
+
+            self.plots_layout.addWidget(container)
+            self.plots_layout.addWidget(ResizeHandle(container))
+
+        if len(self.plot_widgets) > 1:
+            for i in range(1, len(self.plot_widgets)):
+                self.plot_widgets[i].setXLink(self.plot_widgets[0])
+
+        if self.plot_widgets:
+            view_box = self.plot_widgets[0].getViewBox()
+            view_box.sigRangeChanged.connect(self.on_view_range_changed)
+
+        self._populate_playback_channel_combo()
+        self.set_region(0, self.sensor_data.duration * 0.1)
+        self.update_all_spectrograms()
+
+    def _populate_playback_channel_combo(self):
+        """Populate the playback channel dropdown from the current sensor data."""
+        if self.channel_combo is None or self.sensor_data is None:
+            return
+        self.channel_combo.clear()
+        if hasattr(self.sensor_data, 'channel_names') and self.sensor_data.channel_names:
+            for i, channel_name in enumerate(self.sensor_data.channel_names):
+                self.channel_combo.addItem(f"Channel {i}: {channel_name}", i)
+        else:
+            for i in range(self.sensor_data.n_channels):
+                self.channel_combo.addItem(f"Channel {i}", i)
+        if self.channel_combo.count() > 0:
+            self.channel_combo.setCurrentIndex(0)
     
     def set_x_range(self, x_min: float, x_max: float):
         """
@@ -544,47 +598,59 @@ class SpectrogramWidget(QWidget):
     def set_active_channels(self, channel_indices: List[int]):
         """Filter which channels are shown. Rebuilds plots immediately if data is loaded."""
         self.active_channels = channel_indices
-        if self.sensor_data is not None:
-            self.set_data(self.sensor_data)
+        if self.boxes:
+            self.set_boxes(self.boxes)
+        elif self.sensor_data is not None:
+            self._build_legacy_channel_plots()
 
     def update_all_spectrograms(self):
-        """Compute and display STFT spectrograms for all active channels."""
+        """Compute and display STFT spectrograms for all plots."""
         if self.sensor_data is None:
             return
-        
-        for plot_idx in range(len(self._active_channel_indices)):
-            self.update_spectrogram_for_channel(plot_idx)
-        
-        # Update overall info
+
+        for plot_idx in range(len(self.plot_widgets)):
+            self.update_spectrogram_for_plot(plot_idx)
+
         db_status = f", dB scale (ref={self.db_ref:.0e}, range=[{self.vmin}, {self.vmax}]dB)" if self.use_db else ", linear scale"
         self.overall_info.setText(
             f"STFT Parameters: window={self.window_size}, "
             f"overlap={self.overlap*100:.0f}%, type={self.window_type}{db_status}"
         )
-    
-    def update_spectrogram_for_channel(self, plot_idx: int):
+
+    def update_spectrogram_for_plot(self, plot_idx: int):
         """
         Compute and display STFT spectrogram for a specific plot slot.
-        
-        Args:
-            plot_idx: Position index into plot_widgets (maps to _active_channel_indices)
+
+        In box mode the plot corresponds to a Time Series box and uses the
+        box's selected STFT channel.  In legacy mode it maps to
+        ``_active_channel_indices``.
         """
         if self.sensor_data is None or plot_idx >= len(self.plot_widgets):
             return
-        
-        channel_idx = self._active_channel_indices[plot_idx]
-        
+
+        if self.boxes and plot_idx < len(self.boxes):
+            box = self.boxes[plot_idx]
+            stft_channel = box.get_stft_channel()
+            if stft_channel is None:
+                return
+            dataset_id, channel_idx = stft_channel
+            sensor_data = box.datasets.get(dataset_id)
+            if sensor_data is None or channel_idx >= sensor_data.n_channels:
+                return
+            channel_data = sensor_data.get_channel(channel_idx)
+            sample_rate = sensor_data.sample_rate
+        else:
+            channel_idx = self._active_channel_indices[plot_idx]
+            channel_data = self.sensor_data.get_channel(channel_idx)
+            sample_rate = self.sensor_data.sample_rate
+
         plot_widget = self.plot_widgets[plot_idx]
         image_item = self.image_items[plot_idx]
         color_bar = self.color_bars[plot_idx]
-        
-        # Get channel data
-        channel_data = self.sensor_data.get_channel(channel_idx)
-        
-        # Compute STFT
+
         times, frequencies, spectrogram = compute_stft(
             channel_data,
-            self.sensor_data.sample_rate,
+            sample_rate,
             window_size=self.window_size,
             overlap=self.overlap,
             window_type=self.window_type

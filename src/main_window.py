@@ -12,12 +12,17 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QEvent, QThread, pyqtSignal as _pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtWidgets import QApplication
 
 import src.manipulations
 from src.models.sensor_data import SensorData
 from src.models.annotation import Annotation
 from src.utils.data_loader import load_data, load_annotations_json
-from src.utils.export import export_to_json, export_to_csv, save_session, load_session
+from src.utils.export import (
+    export_to_json, export_to_csv, save_session, load_session,
+    export_channel_to_csv, export_channel_to_npy, export_channel_to_hdf5,
+    export_all_channels_to_csv, export_all_channels_to_npy, export_all_channels_to_hdf5,
+)
 from src.utils.config import AppConfig
 from src.widgets.timeseries_widget import TimeSeriesWidget
 from src.widgets.fft_widget import FFTWidget
@@ -34,6 +39,7 @@ from src.widgets.manage_config_dialog import (
     load_enabled_manipulations,
     save_enabled_manipulations,
 )
+from src.widgets.export_dialog import ExportDialog
 
 
 class MainWindow(QMainWindow):
@@ -137,10 +143,14 @@ class MainWindow(QMainWindow):
         self.data_mgmt_panel.load_config_requested.connect(self.load_config_file)
         self.data_mgmt_panel.clear_all_data_requested.connect(self.on_clear_all_data)
         self.data_mgmt_panel.channels_applied.connect(self.on_channels_applied)
-        self.data_mgmt_panel.channel_deleted.connect(self.on_channel_deleted)
-        self.data_mgmt_panel.channel_duplicated.connect(self.on_channel_duplicated)
         self.data_mgmt_panel.box_deleted.connect(self.on_box_deleted)
         self.data_mgmt_panel.box_duplicated.connect(self.on_box_duplicated)
+        self.data_mgmt_panel.box_config_applied.connect(self.on_box_config_applied)
+        self.data_mgmt_panel.channels_export_requested.connect(self.on_channels_export_requested)
+        self.data_mgmt_panel.channels_duplicate_requested.connect(self.on_channels_duplicate_requested)
+        self.data_mgmt_panel.channels_delete_requested.connect(self.on_channels_delete_requested)
+        self.data_mgmt_panel.export_all_channels_requested.connect(self.on_export_all_channels_requested)
+        self.data_mgmt_panel.new_box_requested.connect(self.on_new_box_requested)
         self.tab_widget.addTab(self.data_mgmt_panel, 'Data Mgmt')
 
         # "+" tab — always last; clicking it opens the add-tab dialog
@@ -238,8 +248,8 @@ class MainWindow(QMainWindow):
 
     def on_channels_applied(self, configs: list):
         """
-        Handle channel name edits and FFT/STFT filter changes from Data Mgmt panel.
-        configs: list of {dataset_id, channel_idx, name, fft, stft}
+        Handle channel name edits from Data Mgmt panel.
+        configs: list of {dataset_id, channel_idx, name}
         """
         # Update channel names in all datasets
         for cfg in configs:
@@ -247,32 +257,174 @@ class MainWindow(QMainWindow):
             if sensor_data and cfg['channel_idx'] < len(sensor_data.channel_names):
                 sensor_data.channel_names[cfg['channel_idx']] = cfg['name']
 
-        # Apply channel filters to FFT and Spectrogram for the most recent dataset
+        # Refresh FFT panel channel list to match new names
         if self.sensor_data is not None:
-            dataset_id = os.path.basename(self.sensor_data.filename) if self.sensor_data.filename else None
-            if dataset_id:
-                fft_channels = [
-                    cfg['channel_idx'] for cfg in configs
-                    if cfg['dataset_id'] == dataset_id and cfg['fft']
-                ]
-                stft_channels = [
-                    cfg['channel_idx'] for cfg in configs
-                    if cfg['dataset_id'] == dataset_id and cfg['stft']
-                ]
-                self.fft_widget.set_active_channels(fft_channels)
-                self.spectrogram_widget.set_active_channels(stft_channels)
-                # Refresh FFT panel channel list to match new names
-                self.fft_panel.update_channel_list(self.sensor_data.channel_names)
+            self.fft_panel.update_channel_list(self.sensor_data.channel_names)
 
         # Refresh timeseries legends (names may have changed)
         for box in self.timeseries_widget.plot_boxes:
             box.refresh_traces(self.timeseries_widget.datasets)
+
+        # Refresh the audio playback channel dropdown to show updated names
+        self.timeseries_widget.refresh_channel_combo()
+
+        # Refresh manipulation panels with updated channel names
+        self._refresh_manipulation_channels()
 
         # Refresh Data Mgmt panel so names update in box sections too
         self.data_mgmt_panel.refresh(
             self.timeseries_widget.plot_boxes,
             self.timeseries_widget.datasets,
         )
+
+    def _delete_channel_core(self, dataset_id: str, channel_idx: int) -> bool:
+        """Mutate data and box traces for a single channel deletion.
+        Does not refresh UI. Returns True if the channel was deleted.
+        """
+        sensor_data = self.datasets.get(dataset_id)
+        if sensor_data is None or sensor_data.n_channels <= 1:
+            return False
+
+        import numpy as np
+        sensor_data.data = np.delete(sensor_data.data, channel_idx, axis=1)
+        sensor_data.channel_names.pop(channel_idx)
+
+        boxes_to_remove = []
+        for box in self.timeseries_widget.plot_boxes:
+            to_remove = []
+            for trace in list(box.traces):
+                if trace['dataset_id'] == dataset_id:
+                    if trace['channel_idx'] == channel_idx:
+                        to_remove.append((trace['dataset_id'], trace['channel_idx']))
+                    elif trace['channel_idx'] > channel_idx:
+                        trace['channel_idx'] -= 1
+            for did, cidx in to_remove:
+                box.remove_trace(did, cidx)
+
+            if not box.traces:
+                boxes_to_remove.append(box)
+
+        for box in boxes_to_remove:
+            self.timeseries_widget.remove_box(box)
+
+        return True
+
+    def _delete_channels_core_batch(self, channels_by_dataset: Dict[str, list[int]]) -> Dict[str, int]:
+        """Delete multiple channels efficiently in one pass per dataset.
+        
+        Processes all channels for each dataset at once, avoiding redundant iterations
+        and index adjustment loops. Returns {dataset_id: deleted_count}.
+        Does not refresh UI.
+        """
+        import numpy as np
+        deleted_by_dataset: Dict[str, int] = {}
+        
+        for dataset_id, indices in channels_by_dataset.items():
+            sensor_data = self.datasets.get(dataset_id)
+            if sensor_data is None:
+                continue
+            
+            # Sort descending to avoid index shifting issues
+            sorted_indices = sorted(set(indices), reverse=True)  # deduplicate
+            
+            # Check if we have valid indices to delete
+            valid_indices = [idx for idx in sorted_indices if 0 <= idx < sensor_data.n_channels]
+            if not valid_indices:
+                continue
+            
+            # Delete from data array in one operation using ascending indices for np.delete
+            indices_to_delete = sorted(valid_indices, reverse=False)
+            sensor_data.data = np.delete(sensor_data.data, indices_to_delete, axis=1)
+            
+            # Remove names in descending order to avoid index shifting during pop
+            for idx in sorted(valid_indices, reverse=True):
+                if 0 <= idx < len(sensor_data.channel_names):
+                    sensor_data.channel_names.pop(idx)
+            
+            # Now update all boxes with deferred UI updates
+            boxes_to_remove = []
+            for box in self.timeseries_widget.plot_boxes:
+                # Collect all traces to remove for this dataset/box combo
+                traces_to_remove = []
+                for trace in list(box.traces):
+                    if trace['dataset_id'] == dataset_id and trace['channel_idx'] in valid_indices:
+                        traces_to_remove.append(trace)
+                
+                # Remove all traces at once with deferred updates
+                for trace in traces_to_remove:
+                    box.remove_trace(trace['dataset_id'], trace['channel_idx'], defer_update=True)
+                
+                # Adjust remaining indices once
+                for trace in box.traces:
+                    if trace['dataset_id'] == dataset_id:
+                        # Count how many indices below this one were deleted
+                        shift = sum(1 for idx in valid_indices if idx < trace['channel_idx'])
+                        trace['channel_idx'] -= shift
+                
+                # Finalize UI updates for this box
+                if traces_to_remove:
+                    box.finish_batch_remove()
+                
+                if not box.traces:
+                    boxes_to_remove.append(box)
+            
+            # Remove empty boxes
+            for box in boxes_to_remove:
+                self.timeseries_widget.remove_box(box)
+            
+            # If the entire dataset was deleted (all channels removed), remove it
+            if len(valid_indices) == sensor_data.n_channels:
+                if dataset_id in self.datasets:
+                    del self.datasets[dataset_id]
+            
+            deleted_by_dataset[dataset_id] = len(valid_indices)
+        
+        return deleted_by_dataset
+
+
+    def _duplicate_channel_core(self, dataset_id: str, channel_idx: int) -> str | None:
+        """Add a duplicated channel as a new column in the existing dataset.
+        Returns the dataset_id if successful, or None if the source dataset is missing.
+        """
+        sensor_data = self.datasets.get(dataset_id)
+        if sensor_data is None:
+            return None
+
+        import numpy as np
+        
+        ch_name = sensor_data.channel_names[channel_idx]
+        new_name = f"{ch_name} (copy)"
+        
+        # Copy the channel data
+        channel_data = sensor_data.data[:, channel_idx:channel_idx + 1].copy()
+        
+        # Append as new column to the existing dataset
+        sensor_data.data = np.column_stack((sensor_data.data, channel_data))
+        
+        # Add new channel name
+        sensor_data.channel_names.append(new_name)
+        
+        # Return the dataset_id to indicate success
+        return dataset_id
+
+    def _finalize_channel_change(self):
+        """Refresh all views after one or more channel mutations."""
+        for box in self.timeseries_widget.plot_boxes:
+            box.refresh_traces(self.timeseries_widget.datasets)
+
+        if self.sensor_data is not None:
+            self.fft_panel.update_channel_list(self.sensor_data.channel_names)
+            self._refresh_fft_widget()
+            self._refresh_spectrogram_widget()
+
+        # Refresh the audio playback channel dropdown
+        self.timeseries_widget.refresh_channel_combo()
+
+        self.data_mgmt_panel.refresh(
+            self.timeseries_widget.plot_boxes,
+            self.timeseries_widget.datasets,
+        )
+        self._refresh_manipulation_channels()
 
     def on_channel_deleted(self, dataset_id: str, channel_idx: int):
         """Remove a channel from its dataset and refresh all views."""
@@ -285,34 +437,16 @@ class MainWindow(QMainWindow):
             )
             return
 
-        import numpy as np
-
-        sensor_data.data = np.delete(sensor_data.data, channel_idx, axis=1)
-        sensor_data.channel_names.pop(channel_idx)
-
-        for box in self.timeseries_widget.plot_boxes:
-            to_remove = []
-            for trace in list(box.traces):
-                if trace['dataset_id'] == dataset_id:
-                    if trace['channel_idx'] == channel_idx:
-                        to_remove.append((trace['dataset_id'], trace['channel_idx']))
-                    elif trace['channel_idx'] > channel_idx:
-                        trace['channel_idx'] -= 1
-            for did, cidx in to_remove:
-                box.remove_trace(did, cidx)
-            box.refresh_traces(self.timeseries_widget.datasets)
-
-        if self.sensor_data is sensor_data:
-            self.fft_widget.set_data(sensor_data)
-            self.spectrogram_widget.set_data(sensor_data)
-            self.fft_panel.update_channel_list(sensor_data.channel_names)
-
-        self.data_mgmt_panel.refresh(
-            self.timeseries_widget.plot_boxes,
-            self.timeseries_widget.datasets,
-        )
-        self._refresh_manipulation_channels()
-        self.statusBar().showMessage(f"Deleted channel {channel_idx} from {dataset_id}", 3000)
+        self._set_busy(f"Deleting channel {channel_idx} from {dataset_id}…")
+        self.setUpdatesEnabled(False)
+        try:
+            if self._delete_channel_core(dataset_id, channel_idx):
+                self._finalize_channel_change()
+        finally:
+            self.setUpdatesEnabled(True)
+            self._clear_busy(
+                f"Deleted channel {channel_idx} from {dataset_id}", 3000
+            )
 
     def on_channel_duplicated(self, dataset_id: str, channel_idx: int):
         """Create a new dataset with just this channel's data."""
@@ -321,45 +455,36 @@ class MainWindow(QMainWindow):
             return
 
         ch_name = sensor_data.channel_names[channel_idx]
-        new_data = sensor_data.data[:, channel_idx:channel_idx + 1].copy()
-        new_name = f"{ch_name} (copy)"
-        new_dataset_id = f"{dataset_id}:{ch_name}_copy"
-        counter = 2
-        base_id = new_dataset_id
-        while new_dataset_id in self.datasets:
-            new_dataset_id = f"{base_id}_{counter}"
-            counter += 1
-
-        new_sd = SensorData(
-            timestamps=sensor_data.timestamps.copy(),
-            data=new_data,
-            sample_rate=sensor_data.sample_rate,
-            channel_names=[new_name],
-            filename=sensor_data.filename,
-        )
-        self.datasets[new_dataset_id] = new_sd
-        self.timeseries_widget.add_dataset(new_dataset_id, new_sd, 'separate', None)
-        self.data_mgmt_panel.refresh(
-            self.timeseries_widget.plot_boxes,
-            self.timeseries_widget.datasets,
-        )
-        self._refresh_manipulation_channels()
-        self.statusBar().showMessage(
-            f"Duplicated '{ch_name}' as new dataset '{new_dataset_id}'",
-            3000,
-        )
+        new_dataset_id = None
+        self._set_busy(f"Duplicating '{ch_name}'…")
+        self.setUpdatesEnabled(False)
+        try:
+            new_dataset_id = self._duplicate_channel_core(dataset_id, channel_idx)
+            if new_dataset_id is not None:
+                self._finalize_channel_change()
+        finally:
+            self.setUpdatesEnabled(True)
+            self._clear_busy(
+                f"Duplicated '{ch_name}' as new dataset '{new_dataset_id}'",
+                3000,
+            )
 
     def on_box_deleted(self, box_name: str):
         """Remove a display box from the time series view."""
         box = self.timeseries_widget._find_plot_box(box_name)
         if box is None:
             return
-        self.timeseries_widget.remove_box(box)
-        self.data_mgmt_panel.refresh(
-            self.timeseries_widget.plot_boxes,
-            self.timeseries_widget.datasets,
-        )
-        self.statusBar().showMessage(f"Removed box '{box_name}'", 2000)
+        self._set_busy(f"Removing box '{box_name}'…")
+        try:
+            self.timeseries_widget.remove_box(box)
+            self._refresh_fft_widget()
+            self._refresh_spectrogram_widget()
+            self.data_mgmt_panel.refresh(
+                self.timeseries_widget.plot_boxes,
+                self.timeseries_widget.datasets,
+            )
+        finally:
+            self._clear_busy(f"Removed box '{box_name}'", 2000)
 
     def on_clear_all_data(self):
         """Remove all datasets and plot boxes, returning to pre-load state. Config is preserved."""
@@ -371,7 +496,8 @@ class MainWindow(QMainWindow):
         self.sensor_data = None
 
         self.fft_panel.update_channel_list([])
-        self.spectrogram_widget.clear_plots()
+        self.fft_widget.set_boxes([])
+        self.spectrogram_widget.set_boxes([])
         self._refresh_manipulation_channels()
 
         self.data_mgmt_panel.refresh([], {})
@@ -384,24 +510,67 @@ class MainWindow(QMainWindow):
         if src_box is None:
             return
 
-        from src.widgets.plot_box import PlotBox
-        new_box = PlotBox(self.timeseries_widget._next_box_name(),
-                          self.timeseries_widget.datasets, self.timeseries_widget)
-        for trace in src_box.traces:
-            new_box.add_trace(trace['dataset_id'], trace['channel_idx'],
-                              trace['color'], trace.get('width', 1.0))
-        self.timeseries_widget._add_plot_box(new_box)
-        self.timeseries_widget._relink_x_axes()
-        self.timeseries_widget._refresh_region_items()
-        region = self.timeseries_widget.get_selected_region()
-        if region:
-            new_box.set_region(*region)
-        new_box.get_plot_widget().autoRange()
-        self.data_mgmt_panel.refresh(
-            self.timeseries_widget.plot_boxes,
-            self.timeseries_widget.datasets,
-        )
-        self.statusBar().showMessage(f"Duplicated box '{box_name}'", 2000)
+        self._set_busy(f"Duplicating box '{box_name}'…")
+        try:
+            from src.widgets.plot_box import PlotBox
+            new_box = PlotBox(self.timeseries_widget._next_box_name(),
+                              self.timeseries_widget.datasets, self.timeseries_widget)
+            for trace in src_box.traces:
+                new_box.add_trace(
+                    trace['dataset_id'],
+                    trace['channel_idx'],
+                    trace['color'],
+                    trace.get('width', 1.0),
+                    fft=trace.get('fft', True),
+                    time_domain=trace.get('time_domain', True),
+                )
+            new_box.set_stft_channel(*src_box.get_stft_channel())
+            self.timeseries_widget._add_plot_box(new_box)
+            self.timeseries_widget._relink_x_axes()
+            self.timeseries_widget._refresh_region_items()
+            region = self.timeseries_widget.get_selected_region()
+            if region:
+                new_box.set_region(*region)
+            new_box.get_plot_widget().autoRange()
+            self._refresh_fft_widget()
+            self._refresh_spectrogram_widget()
+            self.data_mgmt_panel.refresh(
+                self.timeseries_widget.plot_boxes,
+                self.timeseries_widget.datasets,
+            )
+        finally:
+            self._clear_busy(f"Duplicated box '{box_name}'", 2000)
+
+    def on_new_box_requested(self):
+        """Create a new empty plot box."""
+        if not self.timeseries_widget.datasets:
+            QMessageBox.information(
+                self,
+                'No Data',
+                'Please load data before creating a new box.'
+            )
+            return
+
+        self._set_busy("Creating new box…")
+        try:
+            from src.widgets.plot_box import PlotBox
+            new_box = PlotBox(self.timeseries_widget._next_box_name(),
+                              self.timeseries_widget.datasets, self.timeseries_widget)
+            self.timeseries_widget._add_plot_box(new_box)
+            self.timeseries_widget._relink_x_axes()
+            self.timeseries_widget._refresh_region_items()
+            region = self.timeseries_widget.get_selected_region()
+            if region:
+                new_box.set_region(*region)
+            new_box.get_plot_widget().autoRange()
+            self._refresh_fft_widget()
+            self._refresh_spectrogram_widget()
+            self.data_mgmt_panel.refresh(
+                self.timeseries_widget.plot_boxes,
+                self.timeseries_widget.datasets,
+            )
+        finally:
+            self._clear_busy("Created new box", 2000)
 
     def create_menus(self):
         menubar = self.menuBar()
@@ -437,10 +606,21 @@ class MainWindow(QMainWindow):
         save_action.triggered.connect(self.save_annotations)
         file_menu.addAction(save_action)
 
-        export_action = QAction('&Export Annotations...', self)
+        export_menu = file_menu.addMenu('E&xport')
+
+        export_action = QAction('&Annotations...', self)
         export_action.setShortcut(QKeySequence('Ctrl+E'))
         export_action.triggered.connect(self.export_annotations)
-        file_menu.addAction(export_action)
+        export_menu.addAction(export_action)
+
+        export_channel_action = QAction('&Channel...', self)
+        export_channel_action.setShortcut(QKeySequence('Ctrl+Shift+E'))
+        export_channel_action.triggered.connect(self.export_channel)
+        export_menu.addAction(export_channel_action)
+
+        export_all_channels_action = QAction('&All Channels...', self)
+        export_all_channels_action.triggered.connect(self.export_all_channels)
+        export_menu.addAction(export_all_channels_action)
 
         file_menu.addSeparator()
 
@@ -465,6 +645,7 @@ class MainWindow(QMainWindow):
 
         autoscale_y_action = QAction('Autoscale &Y-Axis', self)
         autoscale_y_action.setShortcut(QKeySequence('Ctrl+Y'))
+        autoscale_y_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         autoscale_y_action.triggered.connect(self.autoscale_y_axis)
         view_menu.addAction(autoscale_y_action)
 
@@ -500,8 +681,14 @@ class MainWindow(QMainWindow):
         self.spectrogram_widget.clear_all_annotations()
 
     def autoscale_y_axis(self):
-        self.timeseries_widget.autoscale_y_axis()
-        self.spectrogram_widget.autoscale_y_axis()
+        """Autoscale Y-axis based on currently active tab."""
+        current_index = self.tab_widget.currentIndex()
+        if current_index == 0:
+            self.timeseries_widget.autoscale_y_axis()
+        elif current_index == 1:
+            self.spectrogram_widget.autoscale_y_axis()
+        elif current_index == 2:
+            self.fft_widget.autoscale_y_axis()
 
     def home_selection(self):
         if self.tab_widget.currentIndex() == 0:
@@ -560,6 +747,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Region", "Please select a region first.")
             return
 
+        self._set_busy(f"Applying {manip_instance.name}…")
         try:
             # sensor_data.data is (n_samples, n_channels) — use column indexing
             data = sensor_data.data[:, channel_idx].copy()
@@ -568,16 +756,11 @@ class MainWindow(QMainWindow):
             )
             sensor_data.data[:, channel_idx] = new_data
             self.timeseries_widget.refresh_all_traces()
-            self.statusBar().showMessage(
+        finally:
+            self._clear_busy(
                 f"Applied {manip_instance.name} to "
                 f"{sensor_data.channel_names[channel_idx]}",
                 3000,
-            )
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Manipulation Error",
-                f"Error applying {manip_instance.name}:\n{str(e)}\n\n{traceback.format_exc()}",
             )
 
     def on_spatial_manipulation_applied(
@@ -597,6 +780,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid Channel", f"Channel {channel_idx} does not exist.")
             return
 
+        self._set_busy(f"Applying {manip_instance.name}…")
         try:
             data = sensor_data.data[:, channel_idx].copy()
             # Apply over the full time range (no region selection on spatial tab)
@@ -610,20 +794,30 @@ class MainWindow(QMainWindow):
             # Refresh spatial widget and timeseries to reflect modified data
             spatial_widget.set_datasets(self.datasets)
             self.timeseries_widget.refresh_all_traces()
-            self.statusBar().showMessage(
+        finally:
+            self._clear_busy(
                 f"Applied {manip_instance.name} to "
                 f"{sensor_data.channel_names[channel_idx]}",
                 3000,
             )
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Manipulation Error",
-                f"Error applying {manip_instance.name}:\n{str(e)}\n\n{traceback.format_exc()}",
-            )
 
     def eventFilter(self, obj, event):
         return super().eventFilter(obj, event)
+
+    def _set_busy(self, message: str):
+        """Show a wait cursor and set the status bar to a working message."""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage(message)
+        # Force the cursor and status bar to update immediately.
+        QApplication.processEvents()
+
+    def _clear_busy(self, message: str = '', timeout_ms: int = 0):
+        """Restore the normal cursor and optionally show a completion message."""
+        QApplication.restoreOverrideCursor()
+        if message:
+            self.statusBar().showMessage(message, timeout_ms)
+        else:
+            self.statusBar().clearMessage()
 
     def open_file(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -768,6 +962,8 @@ class MainWindow(QMainWindow):
             dataset_id = self._make_dataset_id(filename)
             target_box_name = result.get('box_name') if result['action'] == 'existing' else None
 
+            self._set_busy(f"Finishing load of {os.path.basename(filename)}…")
+            
             self.timeseries_widget.add_dataset(dataset_id, sensor_data, result['layout'], target_box_name)
             self.datasets[dataset_id] = sensor_data
             self.sensor_data = sensor_data
@@ -779,9 +975,9 @@ class MainWindow(QMainWindow):
                         f'{sensor_data.sample_rate:.1f} Hz')
             self.statusBar().showMessage(info_msg)
 
-            self.fft_widget.set_data(sensor_data)
-            self.spectrogram_widget.set_data(sensor_data)
             self.fft_panel.update_channel_list(sensor_data.channel_names)
+            self._refresh_fft_widget()
+            self._refresh_spectrogram_widget()
             if self.annotations:
                 self.spectrogram_widget.set_annotations(self.annotations)
 
@@ -800,6 +996,8 @@ class MainWindow(QMainWindow):
                 f'Could not load file:\n{filename}\n\nError: {str(e)}\n\n{traceback.format_exc()}'
             )
             self.statusBar().showMessage('Error loading file')
+        finally:
+            self._clear_busy()
 
     def save_annotations(self):
         self.annotations = self.timeseries_widget.get_annotations()
@@ -857,6 +1055,182 @@ class MainWindow(QMainWindow):
                     f'Could not export annotations:\n{str(e)}'
                 )
 
+    def export_channel(self, dataset_id: str = None, channel_idx: int = None):
+        """
+        Export a single channel to CSV, NPY, or HDF5.
+
+        If ``dataset_id`` and ``channel_idx`` are provided, the dialog is
+        pre-filled with that channel. Otherwise the user picks from the dialog.
+        """
+        if not self.datasets:
+            QMessageBox.information(
+                self,
+                'No Data',
+                'Please load data before exporting channels.'
+            )
+            return
+
+        region = self.timeseries_widget.get_selected_region()
+        dialog = ExportDialog(self.datasets, mode='channel', default_region=region, parent=self)
+
+        if dataset_id is not None and channel_idx is not None:
+            idx = dialog._dataset_combo.findText(dataset_id)
+            if idx >= 0:
+                dialog._dataset_combo.setCurrentIndex(idx)
+                ch_idx = dialog._channel_combo.findData(channel_idx)
+                if ch_idx >= 0:
+                    dialog._channel_combo.setCurrentIndex(ch_idx)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        result = dialog.get_result()
+        if result is None:
+            return
+
+        dataset_id = result['dataset_id']
+        channel_idx = result['channel_idx']
+        filepath = result['filepath']
+        fmt = result['format']
+        region = result['region']
+
+        sensor_data = self.datasets.get(dataset_id)
+        if sensor_data is None or channel_idx >= sensor_data.n_channels:
+            QMessageBox.warning(self, 'Invalid Channel', 'Selected channel no longer exists.')
+            return
+
+        self._set_busy('Exporting channel…')
+        try:
+            if 'CSV' in fmt:
+                written = export_channel_to_csv(sensor_data, channel_idx, filepath, region)
+            elif 'NumPy' in fmt:
+                written = export_channel_to_npy(sensor_data, channel_idx, filepath, region)
+            else:
+                written = export_channel_to_hdf5(sensor_data, channel_idx, filepath, region)
+        finally:
+            self._clear_busy(f'Exported channel to {written}', 5000)
+
+    def export_all_channels(self):
+        """Export all channels from all datasets to CSV, NPY, or HDF5."""
+        if not self.datasets:
+            QMessageBox.information(
+                self,
+                'No Data',
+                'Please load data before exporting channels.'
+            )
+            return
+
+        region = self.timeseries_widget.get_selected_region()
+        dialog = ExportDialog(self.datasets, mode='all', default_region=region, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        result = dialog.get_result()
+        if result is None:
+            return
+
+        filepath = result['filepath']
+        fmt = result['format']
+        region = result['region']
+        one_file_per_dataset = result.get('one_file_per_dataset', False)
+
+        self._set_busy('Exporting all channels…')
+        try:
+            if 'CSV' in fmt:
+                written = export_all_channels_to_csv(
+                    self.datasets, filepath, region, one_file_per_dataset
+                )
+            elif 'NumPy' in fmt:
+                written = export_all_channels_to_npy(self.datasets, filepath, region)
+            else:
+                written = export_all_channels_to_hdf5(self.datasets, filepath, region)
+
+            if isinstance(written, list):
+                message = f'Exported channels to {len(written)} files'
+            else:
+                message = f'Exported channels to {written}'
+        finally:
+            self._clear_busy(message, 5000)
+
+    def on_channels_export_requested(self, channels: list[tuple[str, int]]):
+        """Handle bulk export of selected channels from the Data Mgmt panel."""
+        for dataset_id, channel_idx in channels:
+            self.export_channel(dataset_id, channel_idx)
+
+    def on_channels_duplicate_requested(self, channels: list[tuple[str, int]]):
+        """Handle bulk duplicate of selected channels with a single redraw."""
+        if not channels:
+            return
+
+        self._set_busy(f"Duplicating {len(channels)} channel(s)…")
+        self.setUpdatesEnabled(False)
+        new_ids: list[str] = []
+        try:
+            for dataset_id, channel_idx in channels:
+                new_id = self._duplicate_channel_core(dataset_id, channel_idx)
+                if new_id is not None:
+                    new_ids.append(new_id)
+            self._finalize_channel_change()
+        finally:
+            self.setUpdatesEnabled(True)
+            if new_ids:
+                self._clear_busy(f"Duplicated {len(new_ids)} channel(s)", 3000)
+            else:
+                self._clear_busy("No channels duplicated", 3000)
+
+    def on_channels_delete_requested(self, channels: list[tuple[str, int]]):
+        """Handle bulk delete of selected channels with optimized batch processing."""
+        if not channels:
+            return
+
+        # Sort by descending channel index within each dataset
+        by_dataset: Dict[str, list[int]] = {}
+        for dataset_id, channel_idx in channels:
+            by_dataset.setdefault(dataset_id, []).append(channel_idx)
+
+        self._set_busy(f"Deleting {len(channels)} channel(s)…")
+        self.setUpdatesEnabled(False)
+        try:
+            deleted_by_dataset = self._delete_channels_core_batch(by_dataset)
+            deleted_count = sum(deleted_by_dataset.values())
+            self._finalize_channel_change()
+        finally:
+            self.setUpdatesEnabled(True)
+            if deleted_count > 0:
+                self._clear_busy(f"Deleted {deleted_count} channel(s)", 3000)
+            else:
+                self._clear_busy("No channels deleted", 3000)
+
+
+    def on_export_all_channels_requested(self):
+        """Handle Export All Channels button in the Data Mgmt panel."""
+        self.export_all_channels()
+
+    def on_box_config_applied(self):
+        """Refresh FFT and Spectrogram tabs after box trace config changes."""
+        self._refresh_fft_widget()
+        self._refresh_spectrogram_widget()
+
+    def _refresh_fft_widget(self):
+        """Rebuild the FFT tab from current box trace configuration and prepopulate with full signal."""
+        if self.sensor_data is None:
+            return
+        self.fft_widget.sensor_data = self.sensor_data
+        self.fft_widget.set_boxes(self.timeseries_widget.plot_boxes)
+        
+        # Prepopulate FFT with the entire signal
+        if self.sensor_data.timestamps is not None and len(self.sensor_data.timestamps) > 0:
+            start_time = float(self.sensor_data.timestamps[0])
+            end_time = float(self.sensor_data.timestamps[-1])
+            self.fft_widget.update_fft(start_time, end_time)
+
+    def _refresh_spectrogram_widget(self):
+        """Rebuild the Spectrogram tab from current box STFT configuration."""
+        if self.sensor_data is None:
+            return
+        self.spectrogram_widget.sensor_data = self.sensor_data
+        self.spectrogram_widget.set_boxes(self.timeseries_widget.plot_boxes)
+
     def show_about(self):
         QMessageBox.about(
             self,
@@ -912,11 +1286,12 @@ class MainWindow(QMainWindow):
             f'type={window_type}, {db_info}'
         )
 
-    def on_fft_parameters_changed(self, nperseg: int, window: str):
-        self.fft_widget.set_fft_parameters(nperseg, window)
+    def on_fft_parameters_changed(self, nperseg: int, window: str, selected_channel: int = -1):
+        self.fft_widget.set_fft_parameters(nperseg, window, selected_channel)
         self.config.fft.nperseg = nperseg
         self.config.fft.window = window
-        self.statusBar().showMessage(f'FFT updated: segment size={nperseg}, window={window}', 2000)
+        channel_info = "all channels" if selected_channel == -1 else f"channel {selected_channel}"
+        self.statusBar().showMessage(f'FFT updated ({channel_info}): segment size={nperseg}, window={window}', 2000)
 
     def on_label_selected(self, label_name: str, color: tuple):
         self.current_annotation_label = label_name
@@ -1007,12 +1382,19 @@ class MainWindow(QMainWindow):
                 sensor_data.apply_channel_names_from_config(self.config.channel_names)
             self.timeseries_widget.refresh_all_traces()
             if self.sensor_data:
-                self.fft_widget.set_data(self.sensor_data)
-                self.spectrogram_widget.set_data(self.sensor_data)
+                self._refresh_fft_widget()
+                self._refresh_spectrogram_widget()
                 if self.annotations:
                     self.spectrogram_widget.set_annotations(self.annotations)
                 self.fft_panel.update_channel_list(self.sensor_data.channel_names)
+            
+            # Refresh all UI panels to show updated channel names immediately
+            self.timeseries_widget.refresh_channel_combo()
             self._refresh_manipulation_channels()
+            self.data_mgmt_panel.refresh(
+                self.timeseries_widget.plot_boxes,
+                self.timeseries_widget.datasets,
+            )
 
         if self.sensor_data:
             self.on_stft_parameters_changed(
@@ -1053,8 +1435,8 @@ class MainWindow(QMainWindow):
                     self.timeseries_widget.add_dataset(dataset_id, sensor_data, 'separate', None)
                     self.datasets[dataset_id] = sensor_data
                     self.sensor_data = sensor_data
-                    self.fft_widget.set_data(sensor_data)
-                    self.spectrogram_widget.set_data(sensor_data)
+                    self._refresh_fft_widget()
+                    self._refresh_spectrogram_widget()
                     self.fft_panel.update_channel_list(sensor_data.channel_names)
                     self.data_mgmt_panel.refresh(
                         self.timeseries_widget.plot_boxes,
@@ -1066,6 +1448,10 @@ class MainWindow(QMainWindow):
                         f'Error reloading {file_cfg.path}: {e}',
                         3000,
                     )
+            
+            # Refresh channel dropdown after loading all files from config
+            if self.sensor_data:
+                self.timeseries_widget.refresh_channel_combo()
 
     def load_config_file(self):
         filename, _ = QFileDialog.getOpenFileName(

@@ -92,16 +92,32 @@ class _EditChannelsDialog(QDialog):
                 color = self._COLORS[self._color_counter % len(self._COLORS)]
                 self._color_counter += 1
                 self.plot_box.add_trace(dataset_id, ch_idx, color, 1.0)
+                # If this box had no STFT selection, default to the new trace.
+                if self.plot_box.get_stft_channel() is None:
+                    self.plot_box.set_stft_channel(dataset_id, ch_idx)
             elif not cb.isChecked() and key in active_now:
                 self.plot_box.remove_trace(dataset_id, ch_idx)
+                # If the removed trace was the STFT selection, clear it.
+                stft_channel = self.plot_box.get_stft_channel()
+                if stft_channel == key:
+                    self.plot_box.set_stft_channel(None, None)
 
         self.accept()
 
 
 class _TraceRow(QWidget):
-    """Single row for one trace — shows identifier and color swatch only."""
+    """Single row for one trace — shows identifier, FFT/Time Domain toggles, and color."""
 
-    def __init__(self, dataset_id: str, channel_idx: int, channel_name: str, color: tuple, parent=None):
+    def __init__(
+        self,
+        dataset_id: str,
+        channel_idx: int,
+        channel_name: str,
+        color: tuple,
+        fft: bool = True,
+        time_domain: bool = True,
+        parent=None,
+    ):
         super().__init__(parent)
         self.dataset_id = dataset_id
         self.channel_idx = channel_idx
@@ -109,12 +125,23 @@ class _TraceRow(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 2)
+        layout.setSpacing(6)
 
         id_label = QLabel(f"{dataset_id} / {channel_name}")
         id_label.setStyleSheet("color: #444; font-size: 10px;")
         layout.addWidget(id_label)
 
         layout.addStretch()
+
+        self.fft_cb = QCheckBox("FFT")
+        self.fft_cb.setChecked(fft)
+        self.fft_cb.setToolTip("Include this trace in the FFT tab")
+        layout.addWidget(self.fft_cb)
+
+        self.time_domain_cb = QCheckBox("Time Domain")
+        self.time_domain_cb.setChecked(time_domain)
+        self.time_domain_cb.setToolTip("Include this trace in the Time Series tab")
+        layout.addWidget(self.time_domain_cb)
 
         self.color_btn = QPushButton()
         self.color_btn.setFixedWidth(36)
@@ -139,13 +166,24 @@ class _TraceRow(QWidget):
     def get_color(self) -> tuple:
         return self._color
 
+    def get_fft(self) -> bool:
+        return self.fft_cb.isChecked()
+
+    def get_time_domain(self) -> bool:
+        return self.time_domain_cb.isChecked()
+
 
 class _ChannelRow(QWidget):
-    """Editable row for one dataset channel — name, FFT checkbox, STFT checkbox."""
+    """Editable row for one dataset channel — selection checkbox and name edit."""
 
-    def __init__(self, dataset_id: str, channel_idx: int, channel_name: str,
-                 fft_checked: bool = True, stft_checked: bool = True,
-                 on_delete=None, on_duplicate=None, parent=None):
+    def __init__(
+        self,
+        dataset_id: str,
+        channel_idx: int,
+        channel_name: str,
+        selected: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.dataset_id = dataset_id
         self.channel_idx = channel_idx
@@ -153,6 +191,11 @@ class _ChannelRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 2)
         layout.setSpacing(6)
+
+        self.select_cb = QCheckBox()
+        self.select_cb.setChecked(selected)
+        self.select_cb.setToolTip("Select this channel for bulk actions")
+        layout.addWidget(self.select_cb)
 
         id_label = QLabel(f"{dataset_id}:")
         id_label.setStyleSheet("color: #888; font-size: 10px;")
@@ -163,66 +206,42 @@ class _ChannelRow(QWidget):
         self.name_edit.setToolTip("Edit display name for this channel")
         layout.addWidget(self.name_edit)
 
-        self.fft_cb = QCheckBox("FFT")
-        self.fft_cb.setChecked(fft_checked)
-        self.fft_cb.setToolTip("Include this channel in the FFT tab")
-        layout.addWidget(self.fft_cb)
-
-        self.stft_cb = QCheckBox("STFT")
-        self.stft_cb.setChecked(stft_checked)
-        self.stft_cb.setToolTip("Include this channel in the Spectrogram tab")
-        layout.addWidget(self.stft_cb)
-
-        dup_btn = QPushButton("⧉")
-        dup_btn.setFixedWidth(24)
-        dup_btn.setToolTip("Duplicate this channel as a new dataset")
-        dup_btn.setStyleSheet("font-size: 11px; padding: 0;")
-        if on_duplicate:
-            dup_btn.clicked.connect(lambda: on_duplicate(dataset_id, channel_idx))
-        layout.addWidget(dup_btn)
-
-        del_btn = QPushButton("🗑")
-        del_btn.setFixedWidth(24)
-        del_btn.setToolTip("Remove this channel from all views")
-        del_btn.setStyleSheet("font-size: 11px; padding: 0;")
-        if on_delete:
-            del_btn.clicked.connect(lambda: on_delete(dataset_id, channel_idx))
-        layout.addWidget(del_btn)
+    def is_selected(self) -> bool:
+        return self.select_cb.isChecked()
 
     def get_name(self) -> str:
         return self.name_edit.text().strip() or self.name_edit.placeholderText()
 
-    def get_fft(self) -> bool:
-        return self.fft_cb.isChecked()
-
-    def get_stft(self) -> bool:
-        return self.stft_cb.isChecked()
-
 
 class DataMgmtPanel(QWidget):
     """
-    Tab content for managing loaded datasets and plot box trace colors.
+    Tab content for managing loaded datasets and plot box trace configuration.
 
-    - "Channels" section: edit channel names and choose FFT/STFT inclusion per channel.
-    - Per-box sections: edit trace colors.
+    - "Channels" section: edit channel names and select channels for bulk actions.
+    - Per-box sections: edit trace colors, FFT/Time Domain inclusion, and per-box
+      STFT channel selection.
     """
 
     load_data_requested = pyqtSignal()
     load_config_requested = pyqtSignal()
     clear_all_data_requested = pyqtSignal()
-    # Emits list of dicts: {dataset_id, channel_idx, name, fft, stft}
+    # Emits list of dicts: {dataset_id, channel_idx, name}
     channels_applied = pyqtSignal(list)
-    channel_deleted = pyqtSignal(str, int)
-    channel_duplicated = pyqtSignal(str, int)
+    # Bulk channel actions: list of (dataset_id, channel_idx)
+    channels_export_requested = pyqtSignal(list)
+    channels_duplicate_requested = pyqtSignal(list)
+    channels_delete_requested = pyqtSignal(list)
+    export_all_channels_requested = pyqtSignal()
+    # Emitted when a box's trace config (colors/fft/time-domain/stft) is applied.
+    box_config_applied = pyqtSignal()
     box_deleted = pyqtSignal(str)       # box_name
     box_duplicated = pyqtSignal(str)    # box_name
+    new_box_requested = pyqtSignal()    # Create a new empty plot box
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._plot_boxes = []
         self._datasets: Dict[str, SensorData] = {}
-        # Persisted checkbox state: (dataset_id, channel_idx) -> {fft, stft}
-        self._channel_states: Dict[Tuple[str, int], Dict] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
@@ -288,6 +307,12 @@ class DataMgmtPanel(QWidget):
         for box in plot_boxes:
             self._add_box_section(box)
 
+        # Add "New Box" button at the bottom
+        new_box_btn = QPushButton("➕  New Box")
+        new_box_btn.setToolTip("Create a new empty plot box")
+        new_box_btn.clicked.connect(self.new_box_requested.emit)
+        self._insert_widget(new_box_btn)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -305,24 +330,60 @@ class DataMgmtPanel(QWidget):
 
         for dataset_id, sensor_data in self._datasets.items():
             for ch_idx, ch_name in enumerate(sensor_data.channel_names):
-                key = (dataset_id, ch_idx)
-                saved = self._channel_states.get(key, {})
-                row = _ChannelRow(
-                    dataset_id, ch_idx, ch_name,
-                    fft_checked=saved.get('fft', True),
-                    stft_checked=saved.get('stft', True),
-                    on_delete=self._on_channel_delete,
-                    on_duplicate=self._on_channel_duplicate,
-                )
+                row = _ChannelRow(dataset_id, ch_idx, ch_name)
                 channel_rows.append(row)
                 section.add_widget(row)
 
-        apply_btn = QPushButton("Apply")
-        apply_btn.setToolTip("Apply name changes and update FFT/STFT channel selection")
+        # Apply names + bulk action buttons
+        btn_row = QWidget()
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(4)
+
+        apply_btn = QPushButton("Apply Names")
+        apply_btn.setToolTip("Apply channel name changes")
         apply_btn.clicked.connect(
             lambda checked=False, rows=channel_rows: self._apply_channels(rows)
         )
-        section.add_widget(apply_btn)
+        btn_layout.addWidget(apply_btn)
+
+        export_all_btn = QPushButton("Export All Channels")
+        export_all_btn.setToolTip("Export all loaded channels to a file")
+        export_all_btn.clicked.connect(self.export_all_channels_requested.emit)
+        btn_layout.addWidget(export_all_btn)
+
+        btn_layout.addStretch()
+        section.add_widget(btn_row)
+
+        # Bulk action buttons for selected channels
+        bulk_row = QWidget()
+        bulk_layout = QHBoxLayout(bulk_row)
+        bulk_layout.setContentsMargins(0, 0, 0, 0)
+        bulk_layout.setSpacing(4)
+
+        export_selected_btn = QPushButton("Export Selected")
+        export_selected_btn.setToolTip("Export selected channels")
+        export_selected_btn.clicked.connect(
+            lambda checked=False, rows=channel_rows: self._export_selected_channels(rows)
+        )
+        bulk_layout.addWidget(export_selected_btn)
+
+        duplicate_selected_btn = QPushButton("Duplicate Selected")
+        duplicate_selected_btn.setToolTip("Duplicate selected channels as new datasets")
+        duplicate_selected_btn.clicked.connect(
+            lambda checked=False, rows=channel_rows: self._duplicate_selected_channels(rows)
+        )
+        bulk_layout.addWidget(duplicate_selected_btn)
+
+        delete_selected_btn = QPushButton("Delete Selected")
+        delete_selected_btn.setToolTip("Delete selected channels")
+        delete_selected_btn.clicked.connect(
+            lambda checked=False, rows=channel_rows: self._delete_selected_channels(rows)
+        )
+        bulk_layout.addWidget(delete_selected_btn)
+
+        bulk_layout.addStretch()
+        section.add_widget(bulk_row)
         self._insert_widget(section)
 
     def _add_box_section(self, plot_box):
@@ -341,24 +402,60 @@ class DataMgmtPanel(QWidget):
                     if sensor_data and channel_idx < len(sensor_data.channel_names)
                     else f"Channel {channel_idx + 1}"
                 )
-                row = _TraceRow(dataset_id, channel_idx, ch_name, trace["color"])
+                row = _TraceRow(
+                    dataset_id,
+                    channel_idx,
+                    ch_name,
+                    trace["color"],
+                    fft=trace.get("fft", True),
+                    time_domain=trace.get("time_domain", True),
+                )
                 trace_rows.append(row)
                 section.add_widget(row)
 
-        # Plot type selector
+        # Plot type + STFT channel selector
         type_row = QWidget()
         type_layout = QHBoxLayout(type_row)
         type_layout.setContentsMargins(0, 0, 0, 0)
         type_layout.setSpacing(4)
+
         type_layout.addWidget(QLabel("Plot type:"))
         plot_type_combo = QComboBox()
         plot_type_combo.addItems(["Line", "Scatter"])
         plot_type_combo.setCurrentText("Line" if plot_box.plot_type == 'line' else "Scatter")
-        plot_type_combo.setToolTip("Toggle between line and scatter (no connecting lines) plot")
+        plot_type_combo.setToolTip("Toggle between line and scatter plot")
         plot_type_combo.currentTextChanged.connect(
             lambda text, pb=plot_box: pb.set_plot_type(text.lower())
         )
         type_layout.addWidget(plot_type_combo)
+
+        type_layout.addWidget(QLabel("STFT:"))
+        stft_combo = QComboBox()
+        stft_combo.addItem("(none)", None)
+        for trace in plot_box.traces:
+            sensor_data = self._datasets.get(trace["dataset_id"])
+            ch_name = (
+                sensor_data.channel_names[trace["channel_idx"]]
+                if sensor_data and trace["channel_idx"] < len(sensor_data.channel_names)
+                else f"Channel {trace['channel_idx'] + 1}"
+            )
+            label = f"{trace['dataset_id']} / {ch_name}"
+            stft_combo.addItem(label, (trace["dataset_id"], trace["channel_idx"]))
+        # Restore previous selection if it still exists in this box.
+        current_stft = plot_box.get_stft_channel()
+        if current_stft is not None:
+            for i in range(stft_combo.count()):
+                data = stft_combo.itemData(i)
+                if data == current_stft:
+                    stft_combo.setCurrentIndex(i)
+                    break
+        stft_combo.setToolTip("Select the channel whose STFT is shown for this box")
+        stft_combo.currentIndexChanged.connect(
+            lambda idx, pb=plot_box, combo=stft_combo: pb.set_stft_channel(*combo.itemData(idx))
+            if combo.itemData(idx) is not None else pb.set_stft_channel(None, None)
+        )
+        type_layout.addWidget(stft_combo)
+
         type_layout.addStretch()
         section.add_widget(type_row)
 
@@ -369,9 +466,9 @@ class DataMgmtPanel(QWidget):
         btn_layout.setSpacing(4)
 
         apply_btn = QPushButton("Apply")
-        apply_btn.setToolTip("Apply color changes to this box")
+        apply_btn.setToolTip("Apply color, FFT, Time Domain, and STFT settings")
         apply_btn.clicked.connect(
-            lambda checked=False, pb=plot_box, rows=trace_rows: self._apply_box_colors(pb, rows)
+            lambda checked=False, pb=plot_box, rows=trace_rows: self._apply_box_config(pb, rows)
         )
         btn_layout.addWidget(apply_btn)
 
@@ -412,27 +509,42 @@ class DataMgmtPanel(QWidget):
     def _apply_channels(self, rows: List[_ChannelRow]):
         configs = []
         for row in rows:
-            key = (row.dataset_id, row.channel_idx)
-            self._channel_states[key] = {'fft': row.get_fft(), 'stft': row.get_stft()}
             configs.append({
                 'dataset_id': row.dataset_id,
                 'channel_idx': row.channel_idx,
                 'name': row.get_name(),
-                'fft': row.get_fft(),
-                'stft': row.get_stft(),
             })
         self.channels_applied.emit(configs)
 
-    def _apply_box_colors(self, plot_box, trace_rows: List[_TraceRow]):
+    def _apply_box_config(self, plot_box, trace_rows: List[_TraceRow]):
         for row in trace_rows:
             for trace in plot_box.traces:
                 if trace["dataset_id"] == row.dataset_id and trace["channel_idx"] == row.channel_idx:
                     trace["color"] = row.get_color()
+                    trace["fft"] = row.get_fft()
+                    trace["time_domain"] = row.get_time_domain()
                     break
         plot_box.refresh_traces(self._datasets)
+        self.box_config_applied.emit()
 
-    def _on_channel_delete(self, dataset_id: str, channel_idx: int):
-        self.channel_deleted.emit(dataset_id, channel_idx)
+    def _get_selected_channel_rows(self, rows: List[_ChannelRow]) -> list[tuple[str, int]]:
+        return [
+            (row.dataset_id, row.channel_idx)
+            for row in rows
+            if row.is_selected()
+        ]
 
-    def _on_channel_duplicate(self, dataset_id: str, channel_idx: int):
-        self.channel_duplicated.emit(dataset_id, channel_idx)
+    def _export_selected_channels(self, rows: List[_ChannelRow]):
+        selected = self._get_selected_channel_rows(rows)
+        if selected:
+            self.channels_export_requested.emit(selected)
+
+    def _duplicate_selected_channels(self, rows: List[_ChannelRow]):
+        selected = self._get_selected_channel_rows(rows)
+        if selected:
+            self.channels_duplicate_requested.emit(selected)
+
+    def _delete_selected_channels(self, rows: List[_ChannelRow]):
+        selected = self._get_selected_channel_rows(rows)
+        if selected:
+            self.channels_delete_requested.emit(selected)

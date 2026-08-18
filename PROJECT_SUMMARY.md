@@ -33,7 +33,7 @@ DataVisualizer/
 │   └── utils/
 │       ├── data_loader.py             # CSV / NumPy / HDF5 loading; string column handling
 │       ├── signal_processing.py       # FFT, STFT, window functions
-│       ├── export.py                  # JSON/CSV annotation export; session save/load
+│       ├── export.py                  # JSON/CSV annotation export; session save/load; channel data export
 │       └── config.py                  # AppConfig dataclass
 ├── requirements.txt
 ├── run.bat
@@ -69,6 +69,11 @@ DataVisualizer/
 - **Time Series**: `setClipToView(True)` + `setDownsampling(auto=True, method='peak')` per `PlotDataItem` — PyQtGraph handles LOD automatically
 - **Spatial color**: 256-entry pre-built `QBrush` palette (viridis); per-point indices into the palette — avoids creating N unique brush objects
 - **Spatial data**: random subsample capped at `max_rows` (default 10,000)
+
+### Box-Based FFT/STFT
+- The **FFT** tab mirrors the Time Series tab: one plot per box, overlaying the FFTs of traces marked with `fft=True`
+- The **Spectrogram** tab is also organized by box; each box has an STFT dropdown selecting which trace's spectrogram to display
+- Trace-level `fft` and `time_domain` flags, plus box-level `stft_channel`, are configured in the Data Mgmt panel
 
 ### Spatial Widget
 - Registered in the extensible tab system via `register_tab_widget`

@@ -7,10 +7,11 @@ A desktop application for loading, visualizing, annotating, and manipulating mul
 - 📂 **Multi-dataset management** — load and manage multiple datasets simultaneously
 - 📈 **Time Series viewer** — scrollable, multi-channel plots with pan/zoom, per-channel plot boxes, and linked region selection
 - 🌈 **Spectrogram (STFT)** — configurable window size, overlap, window type, and dB scale
-- 📊 **FFT Analysis** — frequency domain view of a selected region, per-channel
+- 📊 **FFT Analysis** — frequency domain view of a selected region, organized per box with overlaid traces
 - 🗺️ **Spatial Data (2D)** — scatter plot with X/Y/size/color channel mapping, time-window masking, and axis range sliders
 - 🔧 **Manipulations** — pluggable signal processing operations (normalize, Butterworth filter, Chebyshev filter) applied per-channel to a selected region
 - 🏷️ **Annotations** — drag-to-create labeled time regions, resize, edit notes, delete; exported to JSON/CSV
+- 💾 **Channel export** — export the current channel or all channels to CSV, NumPy, or HDF5
 - ➕ **Extensible tabs** — add new visualization widgets via the `+` tab
 - 💾 **Session save/load** and annotation export
 
@@ -85,8 +86,9 @@ Sidebar sections are **collapsible**. Both the sidebar and the data box list scr
 
 ### Data Mgmt
 - Load data files; each loaded file becomes a named dataset
-- View and rename channels; toggle channels for FFT/STFT display
-- Duplicate or delete datasets and channels
+- **Channels** section: view/rename channels, select channels with checkboxes, and use bulk buttons to export, duplicate, or delete the selected channels
+- **Boxes** section: configure each Time Series box — trace colors, **FFT** inclusion, **Time Domain** inclusion, and a per-box **STFT** channel selector
+- Duplicate or delete individual boxes
 
 ### Time Series
 - One scrollable **Plot Box** per dataset; each box can hold multiple channel traces

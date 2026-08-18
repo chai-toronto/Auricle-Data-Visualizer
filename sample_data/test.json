@@ -1,30 +1,86 @@
 {
-  "sensor_file": "sample_sensor_data.npy",
-  "annotation_count": 2,
-  "annotations": [
+  "channel_names": [
+    "DS",
+    "EB"
+  ],
+  "labels": [
     {
-      "label": "Label1",
-      "start_time": 6.245078753591985,
-      "end_time": 7.94868687907384,
-      "duration": 1.7036081254818551,
+      "name": "Label1",
       "color": [
         255,
         0,
         0
-      ],
-      "notes": ""
+      ]
     },
     {
-      "label": "Label1",
-      "start_time": 3.009471134149535,
-      "end_time": 4.0094711341495355,
-      "duration": 1.0000000000000004,
+      "name": "Label2",
       "color": [
-        255,
         0,
+        255,
         0
-      ],
-      "notes": ""
+      ]
+    },
+    {
+      "name": "Label3",
+      "color": [
+        0,
+        0,
+        255
+      ]
     }
+  ],
+  "stft": {
+    "window_size": 256,
+    "overlap": 0.5,
+    "window_type": "hann",
+    "use_db": true,
+    "db_ref": 1e-12,
+    "vmin": -80.0,
+    "vmax": 0.0
+  },
+  "fft": {
+    "nperseg": 256,
+    "window": "hann"
+  },
+  "ui": {
+    "plot_height_min": 200,
+    "plot_height_max": 250
+  },
+  "data": {
+    "default_sample_rate": 100.0
+  },
+  "loaded_files": [
+    {
+      "path": "HFC_131_data.npy",
+      "dataset_id": "HFC_131_data.npy",
+      "channel_names": [
+        "DS",
+        "EB"
+      ]
+    }
+  ],
+  "manipulations": [
+    {
+      "name": "Normalize",
+      "options": {}
+    },
+    {
+      "name": "Butterworth Filter",
+      "options": {}
+    },
+    {
+      "name": "Power Signed",
+      "options": {}
+    },
+    {
+      "name": "Zero-Phase Filter",
+      "options": {}
+    }
+  ],
+  "enabled_manipulations": [
+    "Normalize",
+    "Butterworth Filter",
+    "Power Signed",
+    "Zero-Phase Filter"
   ]
 }

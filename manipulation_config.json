@@ -1,7 +1,9 @@
 {
   "enabled": [
     "Normalize",
-    "Chernav Filter",
-    "Butterworth Filter"
+    "Butterworth Filter",
+    "Square",
+    "Power Signed",
+    "Zero-Phase Filter"
   ]
 }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import pyqtgraph as pg
 from PyQt6.QtCore import pyqtSignal, Qt
@@ -50,6 +50,9 @@ class PlotBox(QWidget):
         self.plot_widget.setAntialiasing(True)
         self.plot_widget.setMinimumHeight(22)
         self.plot_widget.setMenuEnabled(False)
+
+        # Per-box STFT channel selection: (dataset_id, channel_idx) or None.
+        self.stft_channel: Optional[Tuple[str, int]] = None
 
         self.region_item = pg.LinearRegionItem(
             brush=pg.mkBrush(100, 100, 200, 50),
@@ -188,6 +191,10 @@ class PlotBox(QWidget):
         sensor_data = self.datasets.get(trace['dataset_id'])
         if sensor_data is None:
             return
+        # Traces can be toggled off for the time-domain view while still
+        # contributing to FFT/STFT views.
+        if not trace.get('time_domain', True):
+            return
         channel_idx = trace['channel_idx']
         if channel_idx < 0 or channel_idx >= sensor_data.n_channels:
             return
@@ -220,7 +227,15 @@ class PlotBox(QWidget):
         self.plot_type = plot_type
         self.refresh_traces(self.datasets)
 
-    def add_trace(self, dataset_id: str, channel_idx: int, color: tuple[int, int, int], opacity: float):
+    def add_trace(
+        self,
+        dataset_id: str,
+        channel_idx: int,
+        color: tuple[int, int, int],
+        opacity: float,
+        fft: bool = True,
+        time_domain: bool = True,
+    ):
         key = self._get_trace_key(dataset_id, channel_idx)
         if key in self._plot_items:
             self.remove_trace(dataset_id, channel_idx)
@@ -229,12 +244,19 @@ class PlotBox(QWidget):
             'channel_idx': channel_idx,
             'color': tuple(color),
             'opacity': float(opacity),
+            'fft': bool(fft),
+            'time_domain': bool(time_domain),
         }
         self.traces.append(trace)
         self._plot_trace(trace)
         self._update_axis_label()
 
-    def remove_trace(self, dataset_id: str, channel_idx: int):
+    def remove_trace(self, dataset_id: str, channel_idx: int, defer_update: bool = False):
+        """Remove a trace from the plot.
+        
+        If defer_update=True, skip updating axis label and legend.
+        Call finish_batch_remove() after removing multiple traces with defer_update=True.
+        """
         key = self._get_trace_key(dataset_id, channel_idx)
         plot_item = self._plot_items.pop(key, None)
         if plot_item is not None:
@@ -243,6 +265,11 @@ class PlotBox(QWidget):
             trace for trace in self.traces
             if (trace['dataset_id'], trace['channel_idx']) != key
         ]
+        if not defer_update:
+            self._update_axis_label()
+
+    def finish_batch_remove(self):
+        """Call after removing multiple traces with defer_update=True to finalize UI updates."""
         self._update_axis_label()
 
     def refresh_traces(self, datasets: Dict[str, SensorData]):
@@ -256,6 +283,44 @@ class PlotBox(QWidget):
 
     def get_plot_widget(self) -> pg.PlotWidget:
         return self.plot_widget
+
+    def _find_trace(self, dataset_id: str, channel_idx: int) -> Optional[dict]:
+        """Return the trace dict for a given dataset/channel, or None."""
+        for trace in self.traces:
+            if trace['dataset_id'] == dataset_id and trace['channel_idx'] == channel_idx:
+                return trace
+        return None
+
+    def set_trace_fft(self, dataset_id: str, channel_idx: int, fft: bool):
+        """Set whether this trace contributes to the FFT tab."""
+        trace = self._find_trace(dataset_id, channel_idx)
+        if trace is not None:
+            trace['fft'] = bool(fft)
+
+    def set_trace_time_domain(self, dataset_id: str, channel_idx: int, time_domain: bool):
+        """Set whether this trace contributes to the Time Series tab."""
+        trace = self._find_trace(dataset_id, channel_idx)
+        if trace is not None:
+            trace['time_domain'] = bool(time_domain)
+
+    def get_fft_traces(self) -> list[dict]:
+        """Return traces that should appear in the FFT tab."""
+        return [t for t in self.traces if t.get('fft', True)]
+
+    def get_time_domain_traces(self) -> list[dict]:
+        """Return traces that should appear in the Time Series tab."""
+        return [t for t in self.traces if t.get('time_domain', True)]
+
+    def set_stft_channel(self, dataset_id: Optional[str], channel_idx: Optional[int]):
+        """Set which trace's STFT is shown for this box in the Spectrogram tab."""
+        if dataset_id is None or channel_idx is None:
+            self.stft_channel = None
+        else:
+            self.stft_channel = (dataset_id, channel_idx)
+
+    def get_stft_channel(self) -> Optional[Tuple[str, int]]:
+        """Return the (dataset_id, channel_idx) selected for STFT, or None."""
+        return self.stft_channel
 
     def set_region(self, start: float, end: float):
         self.region_item.blockSignals(True)

@@ -21,7 +21,10 @@ class ResizeHandle(QWidget):
         self.setFixedHeight(7)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
         self.setStyleSheet(
-            "background: #cccccc; border-radius: 3px; margin: 1px 0;"
+            "background: #cccccc; "
+            "border-top: 2px dotted rgba(60, 120, 180, 200); "
+            "border-bottom: 2px dotted rgba(60, 120, 180, 200); "
+            "border-radius: 3px; margin: 1px 0;"
         )
 
     def mousePressEvent(self, event):
@@ -250,7 +253,7 @@ class STFTParameterPanel(QWidget):
 class FFTParameterPanel(QWidget):
     """Panel for controlling FFT parameters."""
 
-    fft_parameters_changed = pyqtSignal(int, str)
+    fft_parameters_changed = pyqtSignal(int, str, int)  # nperseg, window, selected_channel (-1 for all)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -280,8 +283,9 @@ class FFTParameterPanel(QWidget):
         fft_layout.addRow("Window:", self.fft_window_combo)
 
         self.fft_channel_combo = QComboBox()
+        self.fft_channel_combo.addItem("All", -1)  # "All" always first with data value -1
         self.fft_channel_combo.addItem("Channel 1")
-        self.fft_channel_combo.setToolTip("Select channel for FFT analysis")
+        self.fft_channel_combo.setToolTip("Select channel for FFT recomputation (All = recompute all)")
         fft_layout.addRow("Channel:", self.fft_channel_combo)
 
         fft_form = QWidget()
@@ -296,9 +300,11 @@ class FFTParameterPanel(QWidget):
         main_layout.addStretch()
 
     def emit_fft_parameters(self):
+        selected_channel = self.fft_channel_combo.currentData()
         self.fft_parameters_changed.emit(
             self.fft_nperseg_spin.value(),
-            self.fft_window_combo.currentText()
+            self.fft_window_combo.currentText(),
+            selected_channel if selected_channel is not None else -1
         )
 
     def get_fft_parameters(self):
@@ -314,8 +320,14 @@ class FFTParameterPanel(QWidget):
             self.fft_window_combo.setCurrentIndex(index)
 
     def get_selected_fft_channel(self):
-        return self.fft_channel_combo.currentIndex()
+        return self.fft_channel_combo.currentData()
 
     def update_channel_list(self, channel_names: list):
+        current_index = self.fft_channel_combo.currentIndex()
         self.fft_channel_combo.clear()
-        self.fft_channel_combo.addItems(channel_names)
+        self.fft_channel_combo.addItem("All", -1)  # "All" always first
+        for i, ch_name in enumerate(channel_names):
+            self.fft_channel_combo.addItem(ch_name, i)
+        # Restore to "All" if it was selected
+        if current_index == 0:
+            self.fft_channel_combo.setCurrentIndex(0)

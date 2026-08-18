@@ -215,7 +215,7 @@ class TimeSeriesWidget(QWidget):
         apply_btn.clicked.connect(self.update_region_from_inputs)
         controls_layout.addWidget(apply_btn)
 
-        jump_to_btn = QPushButton('Jump To')
+        jump_to_btn = QPushButton('Jump To Selection')
         jump_to_btn.clicked.connect(self.jump_to_range)
         jump_to_btn.setToolTip('Jump to the specified time range (sets the zoom/pan)')
         controls_layout.addWidget(jump_to_btn)
@@ -230,6 +230,27 @@ class TimeSeriesWidget(QWidget):
         select_all_btn.clicked.connect(self.select_all)
         select_all_btn.setToolTip('Set region to cover all loaded data')
         controls_layout.addWidget(select_all_btn)
+
+        controls_layout.addSpacing(20)
+
+        controls_layout.addWidget(QLabel('Play Channel:'))
+        self.channel_combo = QComboBox()
+        self.channel_combo.setToolTip('Select which channel to play')
+        self.channel_combo.setMaximumWidth(120)
+        controls_layout.addWidget(self.channel_combo)
+
+        self.play_button = QPushButton('▶ Play Segment')
+        self.play_button.clicked.connect(self.play_selected_segment)
+        self.play_button.setToolTip('Play the highlighted region as audio')
+        self.play_button.setMaximumWidth(140)
+        controls_layout.addWidget(self.play_button)
+
+        self.stop_button = QPushButton('⏹ Stop Playback')
+        self.stop_button.clicked.connect(self.stop_playback)
+        self.stop_button.setToolTip('Stop audio playback')
+        self.stop_button.setMaximumWidth(140)
+        self.stop_button.setEnabled(False)
+        controls_layout.addWidget(self.stop_button)
 
         controls_layout.addStretch()
 
@@ -256,11 +277,40 @@ class TimeSeriesWidget(QWidget):
         return DEFAULT_TRACE_COLORS[channel_idx % len(DEFAULT_TRACE_COLORS)]
 
     def _update_channel_combo_for_sensor_data(self, sensor_data: SensorData):
+        """Update the channel combo for a single sensor data (legacy, for initial load)."""
         if self.channel_combo is None:
             return
         self.channel_combo.clear()
         for i, channel_name in enumerate(sensor_data.channel_names):
             self.channel_combo.addItem(f'Channel {i}: {channel_name}', i)
+        if self.channel_combo.count() > 0:
+            self.channel_combo.setCurrentIndex(0)
+
+    def refresh_channel_combo(self):
+        """Refresh the channel combo dropdown to reflect current datasets and channel names."""
+        if self.channel_combo is None:
+            return
+        
+        # Preserve current selection if possible
+        current_data = self.channel_combo.currentData()
+        
+        self.channel_combo.clear()
+        
+        # Add all channels from all datasets
+        for dataset_id, sensor_data in self.datasets.items():
+            for i, channel_name in enumerate(sensor_data.channel_names):
+                display_text = f'Channel {i}: {channel_name}'
+                # Store both dataset_id and channel_idx as data
+                self.channel_combo.addItem(display_text, (dataset_id, i))
+        
+        # Restore previous selection if it still exists
+        if current_data is not None:
+            for idx in range(self.channel_combo.count()):
+                if self.channel_combo.itemData(idx) == current_data:
+                    self.channel_combo.setCurrentIndex(idx)
+                    return
+        
+        # Otherwise select first channel
         if self.channel_combo.count() > 0:
             self.channel_combo.setCurrentIndex(0)
 
@@ -354,16 +404,21 @@ class TimeSeriesWidget(QWidget):
                 new_boxes.append(target_box)
             for channel_idx in range(sensor_data.n_channels):
                 target_box.add_trace(dataset_id, channel_idx, self._default_trace_color(channel_idx), 1.0)
+                if target_box.get_stft_channel() is None:
+                    target_box.set_stft_channel(dataset_id, channel_idx)
         elif layout == 'overlay':
             box = PlotBox(self._next_box_name(), self.datasets, self)
             for channel_idx in range(sensor_data.n_channels):
                 box.add_trace(dataset_id, channel_idx, self._default_trace_color(channel_idx), 1.0)
+                if box.get_stft_channel() is None:
+                    box.set_stft_channel(dataset_id, channel_idx)
             self._add_plot_box(box)
             new_boxes.append(box)
         else:
             for channel_idx in range(sensor_data.n_channels):
                 box = PlotBox(self._next_box_name(), self.datasets, self)
                 box.add_trace(dataset_id, channel_idx, self._default_trace_color(channel_idx), 1.0)
+                box.set_stft_channel(dataset_id, channel_idx)
                 self._add_plot_box(box)
                 new_boxes.append(box)
 
@@ -741,8 +796,7 @@ class TimeSeriesWidget(QWidget):
             view_box.setXRange(x_min, x_max, padding=0)
 
     def play_selected_segment(self):
-        sensor_data = self.sensor_data
-        if sensor_data is None or not self.region_items:
+        if not self.region_items:
             QMessageBox.warning(self, 'No Data', 'Please load data first.')
             return
         try:
@@ -758,11 +812,30 @@ class TimeSeriesWidget(QWidget):
                 if main_window.is_playing:
                     return
                 start, end = self.region_items[0].getRegion()
+                
+                # Get selected dataset and channel
+                combo_data = self.channel_combo.currentData() if self.channel_combo else None
+                if combo_data is None:
+                    QMessageBox.warning(self, 'No Channel', 'Please select a channel to play.')
+                    return
+                
+                # Handle both old format (int) and new format (tuple)
+                if isinstance(combo_data, tuple):
+                    dataset_id, channel_idx = combo_data
+                    sensor_data = self.datasets.get(dataset_id)
+                else:
+                    # Fallback to first dataset (legacy)
+                    sensor_data = self.sensor_data
+                    channel_idx = combo_data
+                
+                if sensor_data is None:
+                    QMessageBox.warning(self, 'No Data', 'Please load data first.')
+                    return
+                
                 timestamps, data = sensor_data.get_time_slice(start, end)
                 if len(data) == 0:
                     QMessageBox.warning(self, 'Empty Region', 'Please select a valid region to play.')
                     return
-                channel_idx = self.channel_combo.currentData() if self.channel_combo else 0
                 audio_data = data[:, channel_idx]
                 max_val = np.max(np.abs(audio_data))
                 if max_val > 0:
