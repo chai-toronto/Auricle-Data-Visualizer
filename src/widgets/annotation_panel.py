@@ -107,6 +107,9 @@ class AnnotationPanel(QWidget):
                 lambda checked=False, edit=name_edit, color=color_btn, button=delete_btn:
                 self._mark_label_deleted(edit, color, button)
             )
+        add_btn = QPushButton("Add Label")
+        add_btn.clicked.connect(lambda: self._add_label_dialog_row(layout, rows))
+        layout.addWidget(add_btn)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -114,6 +117,28 @@ class AnnotationPanel(QWidget):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         dialog.exec()
+
+    def _add_label_dialog_row(self, layout, rows):
+        row = QHBoxLayout()
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText("New label name")
+        color_btn = QPushButton()
+        color_btn.setProperty("label_color", (128, 128, 128))
+        color_btn.setStyleSheet("background-color: rgb(128, 128, 128);")
+        color_btn.clicked.connect(
+            lambda checked=False, button=color_btn:
+            self._choose_dialog_color(button, button.property("label_color"))
+        )
+        delete_btn = QPushButton("Delete")
+        delete_btn.clicked.connect(
+            lambda checked=False, edit=name_edit, color=color_btn, button=delete_btn:
+            self._mark_label_deleted(edit, color, button)
+        )
+        row.addWidget(name_edit)
+        row.addWidget(color_btn)
+        row.addWidget(delete_btn)
+        layout.insertLayout(layout.count() - 2, row)
+        rows.append((None, name_edit, color_btn, delete_btn))
 
     def _choose_dialog_color(self, button, current):
         chosen = QColorDialog.getColor(QColor(*current), self, "Choose Label Color")
@@ -137,13 +162,21 @@ class AnnotationPanel(QWidget):
                 continue
             color = color_btn.property("label_color")
             if color is None:
-                color = self.labels[old_name]
+                color = self.labels[old_name] if old_name is not None else (128, 128, 128)
             updated[name] = tuple(color)
         self.labels = updated
         self.active_label = next(iter(updated), None)
         self.populate_label_list()
         self.labels_changed.emit()
         dialog.accept()
+
+    def set_labels(self, labels: Dict[str, tuple], active_label: Optional[str] = None):
+        """Replace displayed labels without emitting a change notification."""
+        self.labels = dict(labels)
+        self.active_label = active_label if active_label in self.labels else next(
+            iter(self.labels), None
+        )
+        self.populate_label_list()
     
     def populate_label_list(self):
         """Populate the label list widget."""

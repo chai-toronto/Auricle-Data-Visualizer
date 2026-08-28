@@ -15,6 +15,7 @@ from src.models.sensor_data import SensorData
 from src.models.annotation import Annotation
 from src.utils.signal_processing import compute_stft
 from src.widgets.parameter_panel import CollapsiblePlotContainer, ResizeHandle
+from src.widgets.parameter_panel import CollapsibleSection
 
 
 def normalize_region(start: float, end: float) -> Tuple[float, float]:
@@ -184,20 +185,6 @@ class SpectrogramWidget(QWidget):
         
         controls_layout.addStretch()
         
-        # Annotation controls
-        create_annotation_btn = QPushButton("Create Annotation from Region")
-        create_annotation_btn.clicked.connect(self.create_annotation_from_region)
-        controls_layout.addWidget(create_annotation_btn)
-        
-        delete_selected_btn = QPushButton("Delete Selected Annotation")
-        delete_selected_btn.clicked.connect(self.delete_selected_annotation)
-        delete_selected_btn.setToolTip("Click an annotation to select it, then click this button to delete")
-        controls_layout.addWidget(delete_selected_btn)
-        
-        clear_annotations_btn = QPushButton("Clear All Annotations")
-        clear_annotations_btn.clicked.connect(self.clear_all_annotations)
-        controls_layout.addWidget(clear_annotations_btn)
-        
         main_layout.addLayout(controls_layout)
 
         # Overall info panel at bottom
@@ -205,6 +192,24 @@ class SpectrogramWidget(QWidget):
         self.overall_info.setMaximumHeight(30)
         self.overall_info.setStyleSheet("background-color: #f0f0f0; padding: 5px;")
         main_layout.addWidget(self.overall_info)
+
+    def create_playback_panel(self) -> QWidget:
+        """Create the left-sidebar audio playback controls."""
+        section = CollapsibleSection("Audio Playback")
+        section.add_widget(QLabel("Channel:"))
+        self.channel_combo = QComboBox()
+        self.channel_combo.setToolTip("Select which channel to play")
+        section.add_widget(self.channel_combo)
+
+        self.play_button = QPushButton("Play Segment")
+        self.play_button.clicked.connect(self.play_selected_segment)
+        section.add_widget(self.play_button)
+
+        self.stop_button = QPushButton("Stop Playback")
+        self.stop_button.clicked.connect(self.stop_playback)
+        self.stop_button.setEnabled(False)
+        section.add_widget(self.stop_button)
+        return section
     
     def set_data(self, sensor_data: SensorData):
         """

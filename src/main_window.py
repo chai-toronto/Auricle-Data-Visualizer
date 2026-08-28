@@ -92,6 +92,10 @@ class MainWindow(QMainWindow):
 
         self.annotation_panel = AnnotationPanel()
         self.annotation_panel.label_selected.connect(self.on_label_selected)
+        self.spectrogram_annotation_panel = AnnotationPanel()
+        self.spectrogram_annotation_panel.label_selected.connect(
+            self.on_label_selected
+        )
 
         self.stft_panel = STFTParameterPanel()
         self.stft_panel.stft_parameters_changed.connect(self.on_stft_parameters_changed)
@@ -115,9 +119,18 @@ class MainWindow(QMainWindow):
         ts_sidebar_scroll.setWidgetResizable(True)
         ts_sidebar_scroll.setWidget(ts_sidebar_content)
 
+        spectrogram_sidebar_content = QWidget()
+        spectrogram_sidebar_layout = QVBoxLayout(spectrogram_sidebar_content)
+        spectrogram_sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        spectrogram_sidebar_layout.setSpacing(0)
+        spectrogram_sidebar_layout.addWidget(self.spectrogram_annotation_panel)
+        spectrogram_sidebar_scroll = QScrollArea()
+        spectrogram_sidebar_scroll.setWidgetResizable(True)
+        spectrogram_sidebar_scroll.setWidget(spectrogram_sidebar_content)
+
         self.left_stack = QStackedWidget()
         self.left_stack.addWidget(ts_sidebar_scroll)  # index 0 → Time Series
-        self.left_stack.addWidget(self.stft_panel)         # index 1 → Spectrogram
+        self.left_stack.addWidget(spectrogram_sidebar_scroll)  # index 1 → Spectrogram
         self.left_stack.addWidget(self.fft_panel)          # index 2 → FFT
         self.left_stack.addWidget(QWidget())               # index 3 → Data Mgmt (no sidebar)
         left_layout.addWidget(self.left_stack)
@@ -142,7 +155,6 @@ class MainWindow(QMainWindow):
         self.annotation_panel.delete_all_requested.connect(
             self.timeseries_widget.clear_all_annotations
         )
-
         label, color = self.annotation_panel.get_active_label()
         if label:
             self.timeseries_widget.set_active_label(label, color)
@@ -151,6 +163,33 @@ class MainWindow(QMainWindow):
         self.spectrogram_widget.view_range_changed.connect(self.on_spectrogram_view_range_changed)
         self.spectrogram_widget.annotations_changed.connect(self.on_spectrogram_annotations_changed)
         self.spectrogram_widget.region_changed.connect(self.on_spectrogram_region_changed)
+        self.spectrogram_annotation_panel.create_annotation_requested.connect(
+            self.spectrogram_widget.create_annotation_from_region
+        )
+        self.spectrogram_annotation_panel.delete_selected_requested.connect(
+            self.spectrogram_widget.delete_selected_annotation
+        )
+        self.spectrogram_annotation_panel.delete_all_requested.connect(
+            self.spectrogram_widget.clear_all_annotations
+        )
+        self.annotation_panel.labels_changed.connect(
+            lambda: self.spectrogram_annotation_panel.set_labels(
+                self.annotation_panel.labels, self.annotation_panel.active_label
+            )
+        )
+        self.spectrogram_annotation_panel.labels_changed.connect(
+            lambda: self.annotation_panel.set_labels(
+                self.spectrogram_annotation_panel.labels,
+                self.spectrogram_annotation_panel.active_label,
+            )
+        )
+        self.spectrogram_annotation_panel.set_labels(
+            self.annotation_panel.labels, self.annotation_panel.active_label
+        )
+        spectrogram_sidebar_layout.addWidget(
+            self.spectrogram_widget.create_playback_panel()
+        )
+        spectrogram_sidebar_layout.addWidget(self.stft_panel)
         self.fft_widget = FFTWidget()
 
         self.tab_widget.addTab(self.timeseries_widget, 'Time Series')
@@ -1368,6 +1407,7 @@ class MainWindow(QMainWindow):
     def on_label_selected(self, label_name: str, color: tuple):
         self.current_annotation_label = label_name
         self.timeseries_widget.set_active_label(label_name, color)
+        self.spectrogram_widget.set_active_label(label_name, color)
         self.statusBar().showMessage(f'Active annotation label: {label_name}')
 
     def on_annotations_changed(self):
