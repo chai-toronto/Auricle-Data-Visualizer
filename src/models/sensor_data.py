@@ -41,6 +41,7 @@ class SensorData:
             self.channel_names = [f"Channel {i+1}" for i in range(n_channels)]
         else:
             self.channel_names = list(channel_names)
+        self.spectrogram_enabled = [True] * len(self.channel_names)
     
     @property
     def n_samples(self) -> int:

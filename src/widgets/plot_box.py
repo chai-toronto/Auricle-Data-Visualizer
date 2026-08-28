@@ -14,9 +14,11 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QComboBox,
+    QToolButton,
     QColorDialog,
     QVBoxLayout,
     QWidget,
+    QSizePolicy,
 )
 
 from src.models.sensor_data import SensorData
@@ -24,6 +26,8 @@ from src.models.sensor_data import SensorData
 
 class PlotBox(QWidget):
     view_range_changed = pyqtSignal(float, float)
+    collapsed_changed = pyqtSignal(bool)
+    time_domain_visibility_changed = pyqtSignal(bool)
 
     def __init__(self, box_name: str, datasets: Dict[str, SensorData], parent=None):
         super().__init__(parent)
@@ -32,17 +36,34 @@ class PlotBox(QWidget):
         self.traces: list[dict] = []
         self._plot_items: dict[tuple[str, int], pg.PlotDataItem] = {}
         self.plot_type: str = 'line'  # 'line' or 'scatter'
+        self.show_fft = True
+        self.show_time_domain = True
 
-        self.name_label = QLabel(box_name)
+        self._expanded = False
+        self._expanded_height = 220
+        self.header_button = QToolButton()
+        self.header_button.setCheckable(True)
+        self.header_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.header_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.header_button.setText(f"  {box_name}")
+        self.header_button.setToolTip("Expand or collapse this box")
+        self.header_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.header_button.setStyleSheet(
+            "QToolButton { border: none; background: #d8d8d8; padding: 4px; "
+            "font-weight: bold; text-align: left; }"
+            "QToolButton:hover { background: #c8c8c8; }"
+        )
+        self.header_button.clicked.connect(self._toggle_expanded)
         self.gear_button = QPushButton('\u2699')
         self.gear_button.setFixedWidth(32)
         self.gear_button.clicked.connect(self.open_config_dialog)
 
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.addWidget(self.name_label)
-        title_layout.addStretch()
-
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('w')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -50,9 +71,6 @@ class PlotBox(QWidget):
         self.plot_widget.setAntialiasing(True)
         self.plot_widget.setMinimumHeight(22)
         self.plot_widget.setMenuEnabled(False)
-
-        # Per-box STFT channel selection: (dataset_id, channel_idx) or None.
-        self.stft_channel: Optional[Tuple[str, int]] = None
 
         self.region_item = pg.LinearRegionItem(
             brush=pg.mkBrush(100, 100, 200, 50),
@@ -68,13 +86,13 @@ class PlotBox(QWidget):
         self._y_min_spin = QDoubleSpinBox()
         self._y_min_spin.setRange(-1e9, 1e9)
         self._y_min_spin.setDecimals(3)
-        self._y_min_spin.setFixedWidth(80)
+        self._y_min_spin.setFixedWidth(120)
         self._y_min_spin.setToolTip("Y-axis minimum")
 
         self._y_max_spin = QDoubleSpinBox()
         self._y_max_spin.setRange(-1e9, 1e9)
         self._y_max_spin.setDecimals(3)
-        self._y_max_spin.setFixedWidth(80)
+        self._y_max_spin.setFixedWidth(120)
         self._y_max_spin.setToolTip("Y-axis maximum")
 
         y_set_btn = QPushButton("Set Y")
@@ -87,7 +105,7 @@ class PlotBox(QWidget):
         title_layout.addWidget(QLabel("–"))
         title_layout.addWidget(self._y_max_spin)
         title_layout.addWidget(y_set_btn)
-        title_layout.addWidget(self.gear_button)
+        title_layout.addStretch()
 
         def _apply_y():
             lo = self._y_min_spin.value()
@@ -119,12 +137,43 @@ class PlotBox(QWidget):
         self._legend_layout.setSpacing(12)
         self._legend_layout.addStretch()
 
+        self._content = QWidget()
+        content_layout = QVBoxLayout(self._content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(2)
+        content_layout.addLayout(title_layout)
+        content_layout.addWidget(self.plot_widget)
+        content_layout.addWidget(self._legend_widget)
+        self._content.setVisible(False)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-        layout.addLayout(title_layout)
-        layout.addWidget(self.plot_widget)
-        layout.addWidget(self._legend_widget)
+        layout.addWidget(self.header_button)
+        layout.addWidget(self._content)
+
+    def _toggle_expanded(self):
+        if self._expanded:
+            self._expanded_height = max(self.height(), self._expanded_height)
+        self._expanded = self.header_button.isChecked()
+        self.header_button.setArrowType(
+            Qt.ArrowType.DownArrow if self._expanded else Qt.ArrowType.RightArrow
+        )
+        self._content.setVisible(self._expanded)
+        if self._expanded:
+            self.setFixedHeight(self._expanded_height)
+        else:
+            self.setFixedHeight(self.header_button.sizeHint().height())
+        self.collapsed_changed.emit(not self._expanded)
+
+    def _refresh_title(self):
+        names = [
+            self._get_channel_name(t["dataset_id"], t["channel_idx"])
+            for t in self.traces
+        ]
+        self.header_button.setText(
+            f"{self.box_name}: {', '.join(names)}" if names else self.box_name
+        )
 
     def _emit_view_range_changed(self, *args):
         x_range = self.plot_widget.getViewBox().viewRange()[0]
@@ -191,9 +240,7 @@ class PlotBox(QWidget):
         sensor_data = self.datasets.get(trace['dataset_id'])
         if sensor_data is None:
             return
-        # Traces can be toggled off for the time-domain view while still
-        # contributing to FFT/STFT views.
-        if not trace.get('time_domain', True):
+        if trace.get('hidden', False):
             return
         channel_idx = trace['channel_idx']
         if channel_idx < 0 or channel_idx >= sensor_data.n_channels:
@@ -246,10 +293,12 @@ class PlotBox(QWidget):
             'opacity': float(opacity),
             'fft': bool(fft),
             'time_domain': bool(time_domain),
+            'hidden': False,
         }
         self.traces.append(trace)
         self._plot_trace(trace)
         self._update_axis_label()
+        self._refresh_title()
 
     def remove_trace(self, dataset_id: str, channel_idx: int, defer_update: bool = False):
         """Remove a trace from the plot.
@@ -267,10 +316,12 @@ class PlotBox(QWidget):
         ]
         if not defer_update:
             self._update_axis_label()
+            self._refresh_title()
 
     def finish_batch_remove(self):
         """Call after removing multiple traces with defer_update=True to finalize UI updates."""
         self._update_axis_label()
+        self._refresh_title()
 
     def refresh_traces(self, datasets: Dict[str, SensorData]):
         self.datasets = datasets
@@ -305,27 +356,60 @@ class PlotBox(QWidget):
 
     def get_fft_traces(self) -> list[dict]:
         """Return traces that should appear in the FFT tab."""
-        return [t for t in self.traces if t.get('fft', True)]
+        return [t for t in self.traces if not t.get('hidden', False)]
 
     def get_time_domain_traces(self) -> list[dict]:
         """Return traces that should appear in the Time Series tab."""
-        return [t for t in self.traces if t.get('time_domain', True)]
+        return [t for t in self.traces if not t.get('hidden', False)]
 
-    def set_stft_channel(self, dataset_id: Optional[str], channel_idx: Optional[int]):
-        """Set which trace's STFT is shown for this box in the Spectrogram tab."""
-        if dataset_id is None or channel_idx is None:
-            self.stft_channel = None
-        else:
-            self.stft_channel = (dataset_id, channel_idx)
+    def set_trace_hidden(self, dataset_id: str, channel_idx: int, hidden: bool):
+        trace = self._find_trace(dataset_id, channel_idx)
+        if trace is not None:
+            trace['hidden'] = bool(hidden)
 
     def get_stft_channel(self) -> Optional[Tuple[str, int]]:
-        """Return the (dataset_id, channel_idx) selected for STFT, or None."""
-        return self.stft_channel
+        """Return this box's first visible channel enabled for STFT in Channels."""
+        for trace in self.traces:
+            if trace.get('hidden', False):
+                continue
+            sensor_data = self.datasets.get(trace['dataset_id'])
+            channel_idx = trace['channel_idx']
+            if (
+                sensor_data is not None
+                and channel_idx < len(sensor_data.spectrogram_enabled)
+                and sensor_data.spectrogram_enabled[channel_idx]
+            ):
+                return trace['dataset_id'], channel_idx
+        return None
+
+    def set_stft_channel(self, dataset_id: Optional[str], channel_idx: Optional[int]):
+        """Deprecated compatibility method; STFT selection is channel-level."""
+        return
+
+    def set_show_fft(self, visible: bool):
+        self.show_fft = bool(visible)
+
+    def set_show_time_domain(self, visible: bool):
+        self.show_time_domain = bool(visible)
+        self.setVisible(self.show_time_domain)
+        self.time_domain_visibility_changed.emit(self.show_time_domain)
 
     def set_region(self, start: float, end: float):
         self.region_item.blockSignals(True)
         self.region_item.setRegion([start, end])
         self.region_item.blockSignals(False)
+
+    def set_x_limits(self):
+        """Constrain horizontal navigation to the available timestamp range."""
+        ranges = [
+            data.timestamps for data in self.datasets.values()
+            if data.timestamps is not None and len(data.timestamps) > 0
+        ]
+        if ranges:
+            self.plot_widget.getViewBox().setLimits(
+                xMin=float(min(values[0] for values in ranges)),
+                xMax=float(max(values[-1] for values in ranges)),
+            )
 
     def open_config_dialog(self):
         dialog = PlotBoxConfigDialog(self, self.datasets, self)

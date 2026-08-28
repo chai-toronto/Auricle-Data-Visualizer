@@ -4,7 +4,7 @@ FFT viewer widget for frequency domain analysis.
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTextEdit, 
-    QScrollArea, QHBoxLayout, QDoubleSpinBox, QPushButton
+    QScrollArea, QHBoxLayout, QDoubleSpinBox, QPushButton, QCheckBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QAction
@@ -12,7 +12,7 @@ from typing import Optional, List
 import numpy as np
 from src.models.sensor_data import SensorData
 from src.utils.signal_processing import compute_fft, find_peaks
-from src.widgets.parameter_panel import ResizeHandle
+from src.widgets.parameter_panel import CollapsiblePlotContainer, ResizeHandle
 
 
 class FFTWidget(QWidget):
@@ -28,12 +28,15 @@ class FFTWidget(QWidget):
         super().__init__(parent)
         self.sensor_data: Optional[SensorData] = None
         self.boxes: List = []
+        self._display_boxes: List = []
         self.plot_widgets: List[pg.PlotWidget] = []
         self.info_labels: List[QLabel] = []
         
         # Y-axis range controls for each plot
         self.y_min_spins: List[QDoubleSpinBox] = []
         self.y_max_spins: List[QDoubleSpinBox] = []
+        self.normalization_checkboxes: List[QCheckBox] = []
+        self.normalized_boxes: set[int] = set()
 
         # Hover info labels (one per plot, displayed in upper left)
         self.hover_info_labels: List[QLabel] = []
@@ -75,6 +78,7 @@ class FFTWidget(QWidget):
         self.plots_layout = QVBoxLayout(self.plots_container)
         self.plots_layout.setSpacing(2)
         self.plots_layout.setContentsMargins(0, 0, 0, 0)
+        self.plots_layout.addStretch()
         
         self.scroll_area.setWidget(self.plots_container)
         main_layout.addWidget(self.scroll_area)
@@ -106,19 +110,23 @@ class FFTWidget(QWidget):
             boxes: List of PlotBox widgets from the Time Series tab.
         """
         self.boxes = boxes
+        self._display_boxes = [box for box in boxes if box.show_fft]
         self.clear_plots()
 
         if not boxes or self.sensor_data is None:
             return
 
-        for pos, box in enumerate(boxes):
+        for pos, box in enumerate(self._display_boxes):
             fft_traces = box.get_fft_traces()
 
-            container = QWidget()
-            container.setFixedHeight(220)
-            layout = QVBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(2)
+            trace_names = ", ".join(
+                box._get_channel_name(trace["dataset_id"], trace["channel_idx"])
+                for trace in fft_traces
+            )
+            container = CollapsiblePlotContainer(
+                f"{box.box_name}: {trace_names}" if trace_names else box.box_name
+            )
+            layout = container.content_layout
 
             # Add Y-axis control row
             y_control_layout = QHBoxLayout()
@@ -153,6 +161,13 @@ class FFTWidget(QWidget):
             y_control_layout.addWidget(y_max_spin)
             y_control_layout.addWidget(y_set_btn)
             y_control_layout.addWidget(y_autoscale_btn)
+            normalize_cb = QCheckBox("Norm magnitude")
+            normalize_cb.setToolTip("Normalize each FFT trace in this box to 0-1")
+            normalize_cb.setChecked(pos in self.normalized_boxes)
+            normalize_cb.toggled.connect(
+                lambda checked, index=pos: self._set_box_normalized(index, checked)
+            )
+            y_control_layout.addWidget(normalize_cb)
             y_control_layout.addStretch()
             
             layout.addLayout(y_control_layout)
@@ -171,6 +186,7 @@ class FFTWidget(QWidget):
 
             plot_widget.setAntialiasing(True)
             plot_widget.setMenuEnabled(False)
+            plot_widget.getViewBox().setLimits(xMin=0)
 
             # Create hover info label (positioned in upper left of plot)
             hover_info = QLabel("")
@@ -200,8 +216,14 @@ class FFTWidget(QWidget):
             self.hover_info_labels.append(hover_info)
             self.y_min_spins.append(y_min_spin)
             self.y_max_spins.append(y_max_spin)
-            self.plots_layout.addWidget(container)
-            self.plots_layout.addWidget(ResizeHandle(container))
+            self.normalization_checkboxes.append(normalize_cb)
+            self.plots_layout.insertWidget(self.plots_layout.count() - 1, container)
+            resize_handle = ResizeHandle(container)
+            resize_handle.setVisible(False)
+            container.collapsed_changed.connect(
+                lambda collapsed, handle=resize_handle: handle.setVisible(not collapsed)
+            )
+            self.plots_layout.insertWidget(self.plots_layout.count() - 1, resize_handle)
             
             # Connect Y-axis controls
             view_box = plot_widget.getViewBox()
@@ -344,6 +366,14 @@ class FFTWidget(QWidget):
         # Connect mouse move events through the ViewBox
         view_box.scene().sigMouseMoved.connect(_on_mouse_moved)
 
+    def _set_box_normalized(self, box_index: int, normalized: bool):
+        if normalized:
+            self.normalized_boxes.add(box_index)
+        else:
+            self.normalized_boxes.discard(box_index)
+        if self.current_fft_start_time is not None and self.current_fft_end_time is not None:
+            self.update_fft(self.current_fft_start_time, self.current_fft_end_time)
+
     def _build_legacy_channel_plots(self):
         """Fallback layout when no boxes are available."""
         self.clear_plots()
@@ -440,8 +470,10 @@ class FFTWidget(QWidget):
             self.hover_info_labels.append(hover_info)
             self.y_min_spins.append(y_min_spin)
             self.y_max_spins.append(y_max_spin)
-            self.plots_layout.addWidget(container)
-            self.plots_layout.addWidget(ResizeHandle(container))
+            self.plots_layout.insertWidget(self.plots_layout.count() - 1, container)
+            self.plots_layout.insertWidget(
+                self.plots_layout.count() - 1, ResizeHandle(container)
+            )
              
             # Connect Y-axis controls
             view_box = plot_widget.getViewBox()
@@ -529,7 +561,7 @@ class FFTWidget(QWidget):
     
     def clear_plots(self):
         """Clear all existing plots."""
-        while self.plots_layout.count():
+        while self.plots_layout.count() > 1:
             item = self.plots_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
@@ -537,6 +569,7 @@ class FFTWidget(QWidget):
         self.plot_widgets.clear()
         self.info_labels.clear()
         self.hover_info_labels.clear()
+        self.normalization_checkboxes.clear()
         self.y_min_spins.clear()
         self.y_max_spins.clear()
     
@@ -577,7 +610,7 @@ class FFTWidget(QWidget):
         self, start_time: float, end_time: float, data_slice: np.ndarray, timestamps: np.ndarray
     ):
         """Update box-based FFT plots."""
-        for pos, box in enumerate(self.boxes):
+        for pos, box in enumerate(self._display_boxes):
             if pos >= len(self.plot_widgets):
                 break
             plot_widget = self.plot_widgets[pos]
@@ -601,21 +634,30 @@ class FFTWidget(QWidget):
                 frequencies, magnitudes = compute_fft(
                     channel_data, sensor_data.sample_rate, self.fft_nperseg, self.fft_window
                 )
+                plot_widget.getViewBox().setLimits(
+                    xMin=float(frequencies[0]),
+                    xMax=float(frequencies[-1]),
+                )
                  
                 # Cache FFT data for later use (e.g., autoscale)
                 self.fft_cache[(dataset_id, ch_idx)] = (frequencies, magnitudes)
+                displayed_magnitudes = magnitudes
+                if pos in self.normalized_boxes:
+                    max_magnitude = float(np.max(np.abs(magnitudes), initial=0.0))
+                    if max_magnitude > 0:
+                        displayed_magnitudes = magnitudes / max_magnitude
 
                 color = trace.get('color', (0, 0, 0))
                 plot_widget.plot(
                     frequencies,
-                    magnitudes,
+                    displayed_magnitudes,
                     pen=pg.mkPen(color=color, width=1.5),
                 )
 
-                peak_indices = find_peaks(frequencies, magnitudes, num_peaks=5)
+                peak_indices = find_peaks(frequencies, displayed_magnitudes, num_peaks=5)
                 if len(peak_indices) > 0:
                     peak_freqs = frequencies[peak_indices]
-                    peak_mags = magnitudes[peak_indices]
+                    peak_mags = displayed_magnitudes[peak_indices]
                     plot_widget.plot(
                         peak_freqs,
                         peak_mags,
@@ -655,6 +697,10 @@ class FFTWidget(QWidget):
             channel_data = data_slice[:, ch_idx]
             frequencies, magnitudes = compute_fft(
                 channel_data, self.sensor_data.sample_rate, self.fft_nperseg, self.fft_window
+            )
+            plot_widget.getViewBox().setLimits(
+                xMin=float(frequencies[0]),
+                xMax=float(frequencies[-1]),
             )
 
             plot_widget.plot(
@@ -846,4 +892,3 @@ class FFTWidget(QWidget):
             
             # Maintain x-range
             view_box.setXRange(x_min, x_max, padding=0)
-

@@ -4,7 +4,8 @@ Spectrogram viewer widget for STFT visualization.
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
-    QPushButton, QComboBox, QMessageBox, QLineEdit, QDoubleSpinBox
+    QPushButton, QComboBox, QMessageBox, QLineEdit, QDoubleSpinBox,
+    QToolButton
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from typing import Optional, List, Dict, Tuple
@@ -13,7 +14,7 @@ import threading
 from src.models.sensor_data import SensorData
 from src.models.annotation import Annotation
 from src.utils.signal_processing import compute_stft
-from src.widgets.parameter_panel import ResizeHandle
+from src.widgets.parameter_panel import CollapsiblePlotContainer, ResizeHandle
 
 
 def normalize_region(start: float, end: float) -> Tuple[float, float]:
@@ -77,6 +78,7 @@ class SpectrogramWidget(QWidget):
 
         # Box-based configuration: one plot per Time Series box.
         self.boxes: List = []
+        self._display_boxes: List = []
 
         # Legacy channel filter (kept for API compatibility).
         self.active_channels: Optional[List[int]] = None
@@ -111,6 +113,7 @@ class SpectrogramWidget(QWidget):
         self.plots_layout = QVBoxLayout(self.plots_container)
         self.plots_layout.setSpacing(2)
         self.plots_layout.setContentsMargins(0, 0, 0, 0)
+        self.plots_layout.addStretch()
         
         self.scroll_area.setWidget(self.plots_container)
         main_layout.addWidget(self.scroll_area)
@@ -223,24 +226,36 @@ class SpectrogramWidget(QWidget):
         Args:
             boxes: List of PlotBox widgets from the Time Series tab.
         """
-        self.boxes = boxes
         self.clear_plots()
-
+        self.boxes = boxes
+        self._display_boxes = [
+            box for box in boxes
+            if (
+                box.get_stft_channel() is not None
+                and box.datasets.get(box.get_stft_channel()[0]) is not None
+                and box.datasets[box.get_stft_channel()[0]].spectrogram_enabled[
+                    box.get_stft_channel()[1]
+                ]
+            )
+        ]
         if not boxes or self.sensor_data is None:
             return
 
-        for pos, box in enumerate(boxes):
+        for pos, box in enumerate(self._display_boxes):
             plot_widget = pg.PlotWidget()
             plot_widget.setBackground('w')
             plot_widget.setLabel('left', 'Frequency', units='Hz')
 
-            if pos == len(boxes) - 1:
+            if pos == len(self._display_boxes) - 1:
                 plot_widget.setLabel('bottom', 'Time', units='s')
             else:
                 plot_widget.getAxis('bottom').setStyle(showValues=False)
 
-            plot_widget.setMinimumHeight(200)
             plot_widget.setMenuEnabled(False)
+            plot_widget.getViewBox().setLimits(
+                xMin=float(self.sensor_data.timestamps[0]),
+                xMax=float(self.sensor_data.timestamps[-1]),
+            )
 
             image_item = pg.ImageItem()
             plot_widget.addItem(image_item)
@@ -252,11 +267,20 @@ class SpectrogramWidget(QWidget):
             self.image_items.append(image_item)
             self.color_bars.append(color_bar)
 
-            container = self._create_plot_container(plot_widget)
+            stft_dataset_id, stft_channel_idx = box.get_stft_channel()
+            channel_name = box.datasets[stft_dataset_id].channel_names[stft_channel_idx]
+            container = self._create_plot_container(
+                plot_widget, f"{box.box_name}: {channel_name}"
+            )
             self._plot_containers.append(container)
 
-            self.plots_layout.addWidget(container)
-            self.plots_layout.addWidget(ResizeHandle(container))
+            self.plots_layout.insertWidget(self.plots_layout.count() - 1, container)
+            resize_handle = ResizeHandle(container)
+            resize_handle.setVisible(False)
+            container.collapsed_changed.connect(
+                lambda collapsed, handle=resize_handle: handle.setVisible(not collapsed)
+            )
+            self.plots_layout.insertWidget(self.plots_layout.count() - 1, resize_handle)
 
         if len(self.plot_widgets) > 1:
             for i in range(1, len(self.plot_widgets)):
@@ -291,8 +315,11 @@ class SpectrogramWidget(QWidget):
             else:
                 plot_widget.getAxis('bottom').setStyle(showValues=False)
 
-            plot_widget.setMinimumHeight(200)
             plot_widget.setMenuEnabled(False)
+            plot_widget.getViewBox().setLimits(
+                xMin=float(self.sensor_data.timestamps[0]),
+                xMax=float(self.sensor_data.timestamps[-1]),
+            )
 
             image_item = pg.ImageItem()
             plot_widget.addItem(image_item)
@@ -307,8 +334,13 @@ class SpectrogramWidget(QWidget):
             container = self._create_plot_container(plot_widget)
             self._plot_containers.append(container)
 
-            self.plots_layout.addWidget(container)
-            self.plots_layout.addWidget(ResizeHandle(container))
+            self.plots_layout.insertWidget(self.plots_layout.count() - 1, container)
+            resize_handle = ResizeHandle(container)
+            resize_handle.setVisible(False)
+            container.collapsed_changed.connect(
+                lambda collapsed, handle=resize_handle: handle.setVisible(not collapsed)
+            )
+            self.plots_layout.insertWidget(self.plots_layout.count() - 1, resize_handle)
 
         if len(self.plot_widgets) > 1:
             for i in range(1, len(self.plot_widgets)):
@@ -459,7 +491,7 @@ class SpectrogramWidget(QWidget):
     
     def clear_plots(self):
         """Clear all existing plots."""
-        while self.plots_layout.count():
+        while self.plots_layout.count() > 1:
             item = self.plots_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
@@ -469,19 +501,14 @@ class SpectrogramWidget(QWidget):
         self.color_bars.clear()
         self._plot_containers.clear()
 
-    def _create_plot_container(self, plot_widget: pg.PlotWidget) -> QWidget:
-        """Wrap a PlotWidget in a container that exposes Y-axis range controls."""
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # ── Y-range header ──────────────────────────────────────────────
-        header = QWidget()
-        header.setFixedHeight(26)
-        header.setStyleSheet("background: #f5f5f5; border-bottom: 1px solid #ddd;")
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(4, 2, 4, 2)
+    def _create_plot_container(
+        self, plot_widget: pg.PlotWidget, title: str = ""
+    ) -> QWidget:
+        """Wrap a PlotWidget in a collapsible container with Y-axis controls."""
+        container = CollapsiblePlotContainer(title or "Spectrogram")
+        layout = container.content_layout
+        h_layout = QHBoxLayout()
+        h_layout.setContentsMargins(0, 0, 0, 0)
         h_layout.setSpacing(4)
 
         h_layout.addWidget(QLabel("Y (Hz):"))
@@ -489,7 +516,7 @@ class SpectrogramWidget(QWidget):
         y_min_spin = QDoubleSpinBox()
         y_min_spin.setRange(-1e9, 1e9)
         y_min_spin.setDecimals(1)
-        y_min_spin.setFixedWidth(72)
+        y_min_spin.setFixedWidth(120)
         y_min_spin.setToolTip("Frequency axis minimum (Hz)")
         h_layout.addWidget(y_min_spin)
 
@@ -498,7 +525,7 @@ class SpectrogramWidget(QWidget):
         y_max_spin = QDoubleSpinBox()
         y_max_spin.setRange(-1e9, 1e9)
         y_max_spin.setDecimals(1)
-        y_max_spin.setFixedWidth(72)
+        y_max_spin.setFixedWidth(120)
         y_max_spin.setToolTip("Frequency axis maximum (Hz)")
         h_layout.addWidget(y_max_spin)
 
@@ -509,7 +536,7 @@ class SpectrogramWidget(QWidget):
         h_layout.addWidget(set_btn)
         h_layout.addStretch()
 
-        layout.addWidget(header)
+        layout.addLayout(h_layout)
         layout.addWidget(plot_widget, stretch=1)
 
         # ── wire up interactions ────────────────────────────────────────
@@ -628,8 +655,8 @@ class SpectrogramWidget(QWidget):
         if self.sensor_data is None or plot_idx >= len(self.plot_widgets):
             return
 
-        if self.boxes and plot_idx < len(self.boxes):
-            box = self.boxes[plot_idx]
+        if self._display_boxes and plot_idx < len(self._display_boxes):
+            box = self._display_boxes[plot_idx]
             stft_channel = box.get_stft_channel()
             if stft_channel is None:
                 return

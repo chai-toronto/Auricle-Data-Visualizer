@@ -106,7 +106,7 @@ class _EditChannelsDialog(QDialog):
 
 
 class _TraceRow(QWidget):
-    """Single row for one trace — shows identifier, FFT/Time Domain toggles, and color."""
+    """Single row for one trace — shows identifier, hide toggle, and color."""
 
     def __init__(
         self,
@@ -114,8 +114,7 @@ class _TraceRow(QWidget):
         channel_idx: int,
         channel_name: str,
         color: tuple,
-        fft: bool = True,
-        time_domain: bool = True,
+        hidden: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -133,15 +132,10 @@ class _TraceRow(QWidget):
 
         layout.addStretch()
 
-        self.fft_cb = QCheckBox("FFT")
-        self.fft_cb.setChecked(fft)
-        self.fft_cb.setToolTip("Include this trace in the FFT tab")
-        layout.addWidget(self.fft_cb)
-
-        self.time_domain_cb = QCheckBox("Time Domain")
-        self.time_domain_cb.setChecked(time_domain)
-        self.time_domain_cb.setToolTip("Include this trace in the Time Series tab")
-        layout.addWidget(self.time_domain_cb)
+        self.hide_cb = QCheckBox("Hide")
+        self.hide_cb.setChecked(hidden)
+        self.hide_cb.setToolTip("Hide this channel in this display box")
+        layout.addWidget(self.hide_cb)
 
         self.color_btn = QPushButton()
         self.color_btn.setFixedWidth(36)
@@ -166,15 +160,13 @@ class _TraceRow(QWidget):
     def get_color(self) -> tuple:
         return self._color
 
-    def get_fft(self) -> bool:
-        return self.fft_cb.isChecked()
-
-    def get_time_domain(self) -> bool:
-        return self.time_domain_cb.isChecked()
+    def is_hidden(self) -> bool:
+        return self.hide_cb.isChecked()
 
 
 class _ChannelRow(QWidget):
     """Editable row for one dataset channel — selection checkbox and name edit."""
+    spectrogram_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -182,6 +174,7 @@ class _ChannelRow(QWidget):
         channel_idx: int,
         channel_name: str,
         selected: bool = False,
+        spectrogram_enabled: bool = True,
         parent=None,
     ):
         super().__init__(parent)
@@ -205,6 +198,18 @@ class _ChannelRow(QWidget):
         self.name_edit = QLineEdit(channel_name)
         self.name_edit.setToolTip("Edit display name for this channel")
         layout.addWidget(self.name_edit)
+
+        self.stft_cb = QCheckBox("STFT")
+        self.stft_cb.setChecked(spectrogram_enabled)
+        self.stft_cb.setToolTip("Use this channel for the Spectrogram tab")
+        self.stft_cb.stateChanged.connect(self._on_spectrogram_changed)
+        layout.addWidget(self.stft_cb)
+
+    def _on_spectrogram_changed(self):
+        sensor_data = getattr(self, "_sensor_data", None)
+        if sensor_data is not None:
+            sensor_data.spectrogram_enabled[self.channel_idx] = self.stft_cb.isChecked()
+        self.spectrogram_changed.emit()
 
     def is_selected(self) -> bool:
         return self.select_cb.isChecked()
@@ -234,6 +239,7 @@ class DataMgmtPanel(QWidget):
     export_all_channels_requested = pyqtSignal()
     # Emitted when a box's trace config (colors/fft/time-domain/stft) is applied.
     box_config_applied = pyqtSignal()
+    spectrogram_channels_changed = pyqtSignal()
     box_deleted = pyqtSignal(str)       # box_name
     box_duplicated = pyqtSignal(str)    # box_name
     new_box_requested = pyqtSignal()    # Create a new empty plot box
@@ -304,8 +310,11 @@ class DataMgmtPanel(QWidget):
                 w.deleteLater()
 
         self._add_channels_section()
+        display_boxes = CollapsibleSection("Display Boxes")
         for box in plot_boxes:
-            self._add_box_section(box)
+            self._add_box_section(box, display_boxes)
+        if plot_boxes:
+            self._insert_widget(display_boxes)
 
         # Add "New Box" button at the bottom
         new_box_btn = QPushButton("➕  New Box")
@@ -330,7 +339,14 @@ class DataMgmtPanel(QWidget):
 
         for dataset_id, sensor_data in self._datasets.items():
             for ch_idx, ch_name in enumerate(sensor_data.channel_names):
-                row = _ChannelRow(dataset_id, ch_idx, ch_name)
+                row = _ChannelRow(
+                    dataset_id,
+                    ch_idx,
+                    ch_name,
+                    spectrogram_enabled=sensor_data.spectrogram_enabled[ch_idx],
+                )
+                row._sensor_data = sensor_data
+                row.spectrogram_changed.connect(self.spectrogram_channels_changed.emit)
                 channel_rows.append(row)
                 section.add_widget(row)
 
@@ -386,7 +402,7 @@ class DataMgmtPanel(QWidget):
         section.add_widget(bulk_row)
         self._insert_widget(section)
 
-    def _add_box_section(self, plot_box):
+    def _add_box_section(self, plot_box, parent_section=None):
         section = CollapsibleSection(plot_box.box_name)
         trace_rows: List[_TraceRow] = []
 
@@ -407,13 +423,12 @@ class DataMgmtPanel(QWidget):
                     channel_idx,
                     ch_name,
                     trace["color"],
-                    fft=trace.get("fft", True),
-                    time_domain=trace.get("time_domain", True),
+                    hidden=trace.get("hidden", False),
                 )
                 trace_rows.append(row)
                 section.add_widget(row)
 
-        # Plot type + STFT channel selector
+        # Plot type plus box-level visibility controls.
         type_row = QWidget()
         type_layout = QHBoxLayout(type_row)
         type_layout.setContentsMargins(0, 0, 0, 0)
@@ -428,33 +443,14 @@ class DataMgmtPanel(QWidget):
             lambda text, pb=plot_box: pb.set_plot_type(text.lower())
         )
         type_layout.addWidget(plot_type_combo)
-
-        type_layout.addWidget(QLabel("STFT:"))
-        stft_combo = QComboBox()
-        stft_combo.addItem("(none)", None)
-        for trace in plot_box.traces:
-            sensor_data = self._datasets.get(trace["dataset_id"])
-            ch_name = (
-                sensor_data.channel_names[trace["channel_idx"]]
-                if sensor_data and trace["channel_idx"] < len(sensor_data.channel_names)
-                else f"Channel {trace['channel_idx'] + 1}"
-            )
-            label = f"{trace['dataset_id']} / {ch_name}"
-            stft_combo.addItem(label, (trace["dataset_id"], trace["channel_idx"]))
-        # Restore previous selection if it still exists in this box.
-        current_stft = plot_box.get_stft_channel()
-        if current_stft is not None:
-            for i in range(stft_combo.count()):
-                data = stft_combo.itemData(i)
-                if data == current_stft:
-                    stft_combo.setCurrentIndex(i)
-                    break
-        stft_combo.setToolTip("Select the channel whose STFT is shown for this box")
-        stft_combo.currentIndexChanged.connect(
-            lambda idx, pb=plot_box, combo=stft_combo: pb.set_stft_channel(*combo.itemData(idx))
-            if combo.itemData(idx) is not None else pb.set_stft_channel(None, None)
-        )
-        type_layout.addWidget(stft_combo)
+        fft_cb = QCheckBox("FFT")
+        fft_cb.setChecked(plot_box.show_fft)
+        fft_cb.setToolTip("Show this box in the FFT tab")
+        type_layout.addWidget(fft_cb)
+        time_domain_cb = QCheckBox("Time Series")
+        time_domain_cb.setChecked(plot_box.show_time_domain)
+        time_domain_cb.setToolTip("Show this box in the Time Series tab")
+        type_layout.addWidget(time_domain_cb)
 
         type_layout.addStretch()
         section.add_widget(type_row)
@@ -466,9 +462,10 @@ class DataMgmtPanel(QWidget):
         btn_layout.setSpacing(4)
 
         apply_btn = QPushButton("Apply")
-        apply_btn.setToolTip("Apply color, FFT, Time Domain, and STFT settings")
+        apply_btn.setToolTip("Apply color, hide, and box display settings")
         apply_btn.clicked.connect(
-            lambda checked=False, pb=plot_box, rows=trace_rows: self._apply_box_config(pb, rows)
+            lambda checked=False, pb=plot_box, rows=trace_rows, fft=fft_cb, time=time_domain_cb:
+            self._apply_box_config(pb, rows, fft.isChecked(), time.isChecked())
         )
         btn_layout.addWidget(apply_btn)
 
@@ -498,7 +495,10 @@ class DataMgmtPanel(QWidget):
         btn_layout.addWidget(del_btn)
 
         section.add_widget(btn_row)
-        self._insert_widget(section)
+        if parent_section is not None:
+            parent_section.add_widget(section)
+        else:
+            self._insert_widget(section)
 
     def _open_edit_channels(self, plot_box):
         dialog = _EditChannelsDialog(plot_box, self._datasets, self)
@@ -516,14 +516,16 @@ class DataMgmtPanel(QWidget):
             })
         self.channels_applied.emit(configs)
 
-    def _apply_box_config(self, plot_box, trace_rows: List[_TraceRow]):
+    def _apply_box_config(self, plot_box, trace_rows: List[_TraceRow], show_fft: bool,
+                          show_time_domain: bool):
         for row in trace_rows:
             for trace in plot_box.traces:
                 if trace["dataset_id"] == row.dataset_id and trace["channel_idx"] == row.channel_idx:
                     trace["color"] = row.get_color()
-                    trace["fft"] = row.get_fft()
-                    trace["time_domain"] = row.get_time_domain()
+                    trace["hidden"] = row.is_hidden()
                     break
+        plot_box.set_show_fft(show_fft)
+        plot_box.set_show_time_domain(show_time_domain)
         plot_box.refresh_traces(self._datasets)
         self.box_config_applied.emit()
 

@@ -7,10 +7,10 @@ from typing import Dict, Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QTabWidget, QFileDialog, QMessageBox, QStackedWidget, QDialog, QScrollArea,
+    QTabWidget, QTabBar, QLabel, QFileDialog, QMessageBox, QStackedWidget, QDialog, QScrollArea,
     QProgressDialog,
 )
-from PyQt6.QtCore import Qt, QEvent, QThread, pyqtSignal as _pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QThread, QTimer, pyqtSignal as _pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import QApplication
 
@@ -62,6 +62,13 @@ class MainWindow(QMainWindow):
         self.is_playing = False
         self.stop_in_progress = False
         self.active_playback_widget = None
+        self._pending_analysis_region: Optional[tuple[float, float]] = None
+        self._analysis_refresh_timer = QTimer(self)
+        self._analysis_refresh_timer.setSingleShot(True)
+        self._analysis_refresh_timer.setInterval(2000)
+        self._analysis_refresh_timer.timeout.connect(
+            self._refresh_analysis_after_region_settles
+        )
 
         self.init_ui()
         self.installEventFilter(self)
@@ -123,6 +130,18 @@ class MainWindow(QMainWindow):
         self.timeseries_widget.annotations_changed.connect(self.on_annotations_changed)
         self.timeseries_widget.annotation_selected.connect(self.on_annotation_selected)
         self.timeseries_widget.view_range_changed.connect(self.on_view_range_changed)
+        ts_sidebar_content_layout.insertWidget(
+            1, self.timeseries_widget.create_playback_panel()
+        )
+        self.annotation_panel.create_annotation_requested.connect(
+            self.timeseries_widget.create_annotation_from_region
+        )
+        self.annotation_panel.delete_selected_requested.connect(
+            self.timeseries_widget.delete_selected_annotation
+        )
+        self.annotation_panel.delete_all_requested.connect(
+            self.timeseries_widget.clear_all_annotations
+        )
 
         label, color = self.annotation_panel.get_active_label()
         if label:
@@ -151,7 +170,28 @@ class MainWindow(QMainWindow):
         self.data_mgmt_panel.channels_delete_requested.connect(self.on_channels_delete_requested)
         self.data_mgmt_panel.export_all_channels_requested.connect(self.on_export_all_channels_requested)
         self.data_mgmt_panel.new_box_requested.connect(self.on_new_box_requested)
+        self.data_mgmt_panel.spectrogram_channels_changed.connect(
+            self._refresh_spectrogram_widget
+        )
         self.tab_widget.addTab(self.data_mgmt_panel, 'Data Mgmt')
+        data_mgmt_widget = self.tab_widget.widget(3)
+        data_mgmt_label = self.tab_widget.tabText(3)
+        self.tab_widget.removeTab(3)
+        self.tab_widget.insertTab(0, data_mgmt_widget, data_mgmt_label)
+        self.tab_widget.tabBar().setStyleSheet(
+            "QTabBar::tab:first { background: #4a4a4a; }"
+            "QTabBar::tab:first:selected { background: #333333; }"
+            "QTabBar::tab:first:hover { background: #5a5a5a; }"
+        )
+        data_mgmt_tab_label = QLabel("Data Mgmt", self.tab_widget.tabBar())
+        data_mgmt_tab_label.setStyleSheet("color: #f7f2f2; background: transparent;")
+        data_mgmt_tab_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self.tab_widget.setTabText(0, "")
+        self.tab_widget.tabBar().setTabButton(
+            0, QTabBar.ButtonPosition.LeftSide, data_mgmt_tab_label
+        )
 
         # "+" tab — always last; clicking it opens the add-tab dialog
         self.tab_widget.addTab(QWidget(), "+")
@@ -159,7 +199,7 @@ class MainWindow(QMainWindow):
         self._dynamic_tabs: list[dict] = []
 
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
-        self.tab_widget.setCurrentIndex(3)  # Open on Data Mgmt tab by default
+        self.tab_widget.setCurrentIndex(0)  # Open on Data Mgmt tab by default
 
         splitter.addWidget(left_panel)
         splitter.addWidget(self.tab_widget)
@@ -195,15 +235,24 @@ class MainWindow(QMainWindow):
                 break
 
         if not is_dynamic:
-            if index == 3:
+            if index == 0:
                 self.left_stack.setCurrentIndex(3)
                 self.data_mgmt_panel.refresh(
                     self.timeseries_widget.plot_boxes,
                     self.timeseries_widget.datasets,
                 )
                 self._refresh_manipulation_channels()
-            elif index < 4:
-                self.left_stack.setCurrentIndex(index)
+            elif 1 <= index < 4:
+                self.left_stack.setCurrentIndex(index - 1)
+
+        if index == 2:
+            self._analysis_refresh_timer.stop()
+            self._pending_analysis_region = None
+            self._refresh_spectrogram_for_current_region()
+        elif index == 3:
+            self._analysis_refresh_timer.stop()
+            self._pending_analysis_region = None
+            self._refresh_fft_for_current_region()
 
     def _open_add_tab_dialog(self):
         dlg = AddTabDialog(self)
@@ -288,6 +337,7 @@ class MainWindow(QMainWindow):
         import numpy as np
         sensor_data.data = np.delete(sensor_data.data, channel_idx, axis=1)
         sensor_data.channel_names.pop(channel_idx)
+        sensor_data.spectrogram_enabled.pop(channel_idx)
 
         boxes_to_remove = []
         for box in self.timeseries_widget.plot_boxes:
@@ -323,6 +373,7 @@ class MainWindow(QMainWindow):
             sensor_data = self.datasets.get(dataset_id)
             if sensor_data is None:
                 continue
+            original_channel_count = sensor_data.n_channels
             
             # Sort descending to avoid index shifting issues
             sorted_indices = sorted(set(indices), reverse=True)  # deduplicate
@@ -340,6 +391,8 @@ class MainWindow(QMainWindow):
             for idx in sorted(valid_indices, reverse=True):
                 if 0 <= idx < len(sensor_data.channel_names):
                     sensor_data.channel_names.pop(idx)
+                if 0 <= idx < len(sensor_data.spectrogram_enabled):
+                    sensor_data.spectrogram_enabled.pop(idx)
             
             # Now update all boxes with deferred UI updates
             boxes_to_remove = []
@@ -373,7 +426,7 @@ class MainWindow(QMainWindow):
                 self.timeseries_widget.remove_box(box)
             
             # If the entire dataset was deleted (all channels removed), remove it
-            if len(valid_indices) == sensor_data.n_channels:
+            if len(valid_indices) == original_channel_count:
                 if dataset_id in self.datasets:
                     del self.datasets[dataset_id]
             
@@ -403,6 +456,7 @@ class MainWindow(QMainWindow):
         
         # Add new channel name
         sensor_data.channel_names.append(new_name)
+        sensor_data.spectrogram_enabled.append(sensor_data.spectrogram_enabled[channel_idx])
         
         # Return the dataset_id to indicate success
         return dataset_id
@@ -656,7 +710,7 @@ class MainWindow(QMainWindow):
 
         tools_menu = menubar.addMenu('&Tools')
 
-        manage_config_action = QAction('&Manage Config...', self)
+        manage_config_action = QAction('&Manage Transforms...', self)
         manage_config_action.setShortcut(QKeySequence('Ctrl+M'))
         manage_config_action.triggered.connect(self.manage_config)
         tools_menu.addAction(manage_config_action)
@@ -683,17 +737,17 @@ class MainWindow(QMainWindow):
     def autoscale_y_axis(self):
         """Autoscale Y-axis based on currently active tab."""
         current_index = self.tab_widget.currentIndex()
-        if current_index == 0:
+        if current_index == 1:
             self.timeseries_widget.autoscale_y_axis()
-        elif current_index == 1:
-            self.spectrogram_widget.autoscale_y_axis()
         elif current_index == 2:
+            self.spectrogram_widget.autoscale_y_axis()
+        elif current_index == 3:
             self.fft_widget.autoscale_y_axis()
 
     def home_selection(self):
-        if self.tab_widget.currentIndex() == 0:
+        if self.tab_widget.currentIndex() == 1:
             self.timeseries_widget.home_selection()
-        elif self.tab_widget.currentIndex() == 1:
+        elif self.tab_widget.currentIndex() == 2:
             self.spectrogram_widget.home_selection()
 
     def manage_config(self):
@@ -1274,8 +1328,26 @@ class MainWindow(QMainWindow):
         )
 
     def on_region_changed(self, start_time: float, end_time: float):
-        self.fft_widget.update_fft(start_time, end_time)
         self.spectrogram_widget.set_region(start_time, end_time)
+        self._pending_analysis_region = (start_time, end_time)
+        self._analysis_refresh_timer.start()
+
+    def _refresh_analysis_after_region_settles(self):
+        """Recompute analysis views only after the selected region is idle for 2 seconds."""
+        if self._pending_analysis_region is None:
+            return
+        self._refresh_fft_for_current_region()
+        self._refresh_spectrogram_for_current_region()
+        self._pending_analysis_region = None
+
+    def _refresh_fft_for_current_region(self):
+        region = self.timeseries_widget.get_selected_region()
+        if region is not None:
+            self.fft_widget.update_fft(*region)
+
+    def _refresh_spectrogram_for_current_region(self):
+        if self.spectrogram_widget.sensor_data is not None:
+            self.spectrogram_widget.update_all_spectrograms()
 
     def on_stft_parameters_changed(self, window_size: int, overlap: float, window_type: str,
                                    use_db: bool, db_ref: float, vmin: float, vmax: float):
@@ -1429,6 +1501,16 @@ class MainWindow(QMainWindow):
                         for i, name in enumerate(file_cfg.channel_names):
                             if i < len(sensor_data.channel_names):
                                 sensor_data.channel_names[i] = name
+                    if file_cfg.spectrogram_enabled:
+                        sensor_data.spectrogram_enabled = [
+                            bool(value) for value in file_cfg.spectrogram_enabled
+                        ][:sensor_data.n_channels]
+                        sensor_data.spectrogram_enabled.extend(
+                            [True] * (
+                                sensor_data.n_channels
+                                - len(sensor_data.spectrogram_enabled)
+                            )
+                        )
                     dataset_id = file_cfg.dataset_id
                     if dataset_id in self.datasets:
                         dataset_id = self._make_dataset_id(file_cfg.path)
@@ -1526,6 +1608,7 @@ class MainWindow(QMainWindow):
                     path=sensor_data.filename,
                     dataset_id=dataset_id,
                     channel_names=list(sensor_data.channel_names),
+                    spectrogram_enabled=list(sensor_data.spectrogram_enabled),
                 ))
 
         self.config.manipulations = []

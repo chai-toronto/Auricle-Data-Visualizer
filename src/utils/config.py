@@ -151,6 +151,7 @@ class LoadedFileConfig:
     path: str
     dataset_id: str
     channel_names: List[str] = field(default_factory=list)
+    spectrogram_enabled: List[bool] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> 'LoadedFileConfig':
@@ -159,6 +160,7 @@ class LoadedFileConfig:
             path=data['path'],
             dataset_id=data['dataset_id'],
             channel_names=data.get('channel_names', []),
+            spectrogram_enabled=data.get('spectrogram_enabled', []),
         )
 
     def to_dict(self) -> dict:
@@ -167,6 +169,7 @@ class LoadedFileConfig:
             'path': self.path,
             'dataset_id': self.dataset_id,
             'channel_names': self.channel_names,
+            'spectrogram_enabled': self.spectrogram_enabled,
         }
 
 

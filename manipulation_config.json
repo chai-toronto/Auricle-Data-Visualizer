@@ -3,7 +3,6 @@
     "Normalize",
     "Butterworth Filter",
     "Square",
-    "Power Signed",
-    "Zero-Phase Filter"
+    "Differentiation"
   ]
 }

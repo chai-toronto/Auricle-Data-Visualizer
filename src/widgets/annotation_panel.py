@@ -3,7 +3,8 @@ Annotation panel for managing annotation labels and categories.
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QListWidget, QPushButton,
-    QHBoxLayout, QInputDialog, QColorDialog, QListWidgetItem, QMessageBox
+    QHBoxLayout, QInputDialog, QColorDialog, QListWidgetItem, QMessageBox,
+    QDialog, QLineEdit, QDialogButtonBox
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QColor, QBrush
@@ -21,6 +22,9 @@ class AnnotationPanel(QWidget):
     
     # Signal emitted when labels are modified
     labels_changed = pyqtSignal()
+    create_annotation_requested = pyqtSignal()
+    delete_selected_requested = pyqtSignal()
+    delete_all_requested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -46,7 +50,11 @@ class AnnotationPanel(QWidget):
         # Annotation Labels collapsible section
         labels_section = CollapsibleSection("Annotation Labels")
 
-        # Label list
+        manage_btn = QPushButton("Manage Annotation Labels")
+        manage_btn.clicked.connect(self.manage_labels)
+        labels_section.add_widget(manage_btn)
+
+        # Active label list
         self.label_list = QListWidget()
         self.label_list.itemClicked.connect(self.on_label_clicked)
         self.label_list.itemDoubleClicked.connect(self.edit_label)
@@ -57,29 +65,85 @@ class AnnotationPanel(QWidget):
         btn_layout = QHBoxLayout(btn_widget)
         btn_layout.setContentsMargins(0, 0, 0, 0)
 
-        add_btn = QPushButton("Add")
-        add_btn.clicked.connect(self.add_label)
-        btn_layout.addWidget(add_btn)
-
-        edit_btn = QPushButton("Edit")
-        edit_btn.clicked.connect(self.edit_label)
-        btn_layout.addWidget(edit_btn)
-
-        remove_btn = QPushButton("Remove")
-        remove_btn.clicked.connect(self.remove_label)
-        btn_layout.addWidget(remove_btn)
-
+        create_btn = QPushButton("Create")
+        create_btn.clicked.connect(self.create_annotation_requested)
+        btn_layout.addWidget(create_btn)
+        delete_btn = QPushButton("Delete Selected")
+        delete_btn.clicked.connect(self.delete_selected_requested)
+        btn_layout.addWidget(delete_btn)
+        clear_btn = QPushButton("Delete All")
+        clear_btn.clicked.connect(self.delete_all_requested)
+        btn_layout.addWidget(clear_btn)
         labels_section.add_widget(btn_widget)
-
-        # Change color button
-        color_btn = QPushButton("Change Color")
-        color_btn.clicked.connect(self.change_label_color)
-        labels_section.add_widget(color_btn)
 
         main_layout.addWidget(labels_section)
 
         # Add stretch
         main_layout.addStretch()
+
+    def manage_labels(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage Annotation Labels")
+        layout = QVBoxLayout(dialog)
+        rows = []
+        for name, color in self.labels.items():
+            row = QHBoxLayout()
+            name_edit = QLineEdit(name)
+            color_btn = QPushButton()
+            color_btn.setStyleSheet(
+                f"background-color: rgb({color[0]}, {color[1]}, {color[2]});"
+            )
+            color_btn.clicked.connect(
+                lambda checked=False, button=color_btn, current=color:
+                self._choose_dialog_color(button, current)
+            )
+            delete_btn = QPushButton("Delete")
+            row.addWidget(name_edit)
+            row.addWidget(color_btn)
+            row.addWidget(delete_btn)
+            layout.addLayout(row)
+            rows.append((name, name_edit, color_btn, delete_btn))
+            delete_btn.clicked.connect(
+                lambda checked=False, edit=name_edit, color=color_btn, button=delete_btn:
+                self._mark_label_deleted(edit, color, button)
+            )
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(lambda: self._save_label_dialog(dialog, rows))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def _choose_dialog_color(self, button, current):
+        chosen = QColorDialog.getColor(QColor(*current), self, "Choose Label Color")
+        if chosen.isValid():
+            button.setProperty("label_color", (chosen.red(), chosen.green(), chosen.blue()))
+            button.setStyleSheet(
+                f"background-color: rgb({chosen.red()}, {chosen.green()}, {chosen.blue()});"
+            )
+
+    def _mark_label_deleted(self, name_edit, color_btn, delete_btn):
+        name_edit.clear()
+        name_edit.setEnabled(False)
+        color_btn.setEnabled(False)
+        delete_btn.setEnabled(False)
+
+    def _save_label_dialog(self, dialog, rows):
+        updated = {}
+        for old_name, name_edit, color_btn, _ in rows:
+            name = name_edit.text().strip()
+            if not name:
+                continue
+            color = color_btn.property("label_color")
+            if color is None:
+                color = self.labels[old_name]
+            updated[name] = tuple(color)
+        self.labels = updated
+        self.active_label = next(iter(updated), None)
+        self.populate_label_list()
+        self.labels_changed.emit()
+        dialog.accept()
     
     def populate_label_list(self):
         """Populate the label list widget."""

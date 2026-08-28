@@ -50,7 +50,7 @@ class ResizeHandle(QWidget):
 class CollapsibleSection(QWidget):
     """A titled section that can be expanded or collapsed by clicking its header."""
 
-    def __init__(self, title: str, parent=None, expanded: bool = True):
+    def __init__(self, title: str, parent=None, expanded: bool = False):
         super().__init__(parent)
         self._expanded = expanded
 
@@ -97,6 +97,60 @@ class CollapsibleSection(QWidget):
 
     def add_layout(self, layout):
         self._content_layout.addLayout(layout)
+
+
+class CollapsiblePlotContainer(QWidget):
+    """Full-width collapsible plot container with a compact header."""
+
+    collapsed_changed = pyqtSignal(bool)
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._expanded = False
+        self._expanded_height = 220
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self.header_button = QToolButton()
+        self.header_button.setCheckable(True)
+        self.header_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.header_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.header_button.setText(f"  {title}")
+        self.header_button.setStyleSheet(
+            "QToolButton { border: none; background: #d8d8d8; padding: 4px; "
+            "font-weight: bold; text-align: left; }"
+            "QToolButton:hover { background: #c8c8c8; }"
+        )
+        self.header_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.header_button.clicked.connect(self._toggle)
+        layout.addWidget(self.header_button)
+
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(2)
+        self.content.setVisible(False)
+        layout.addWidget(self.content)
+        self.setFixedHeight(self.header_button.sizeHint().height())
+
+    def _toggle(self):
+        if self._expanded:
+            self._expanded_height = max(self.height(), self._expanded_height)
+        self._expanded = self.header_button.isChecked()
+        self.header_button.setArrowType(
+            Qt.ArrowType.DownArrow if self._expanded else Qt.ArrowType.RightArrow
+        )
+        self.content.setVisible(self._expanded)
+        self.setFixedHeight(
+            self._expanded_height if self._expanded else self.header_button.sizeHint().height()
+        )
+        self.collapsed_changed.emit(not self._expanded)
 
 
 class STFTParameterPanel(QWidget):

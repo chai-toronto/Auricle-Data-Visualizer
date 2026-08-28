@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from src.models.sensor_data import SensorData
 from src.models.annotation import Annotation
 from src.widgets.plot_box import PlotBox
+from src.widgets.parameter_panel import CollapsibleSection
 
 
 DEFAULT_TRACE_COLORS = [
@@ -97,7 +98,9 @@ class _ResizeHandle(QWidget):
         self.setFixedHeight(7)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
         self.setStyleSheet(
-            "background: #cccccc; border-radius: 3px; margin: 1px 0;"
+            "background: #eeeeee; border-top: 2px dotted rgba(60, 120, 180, 128); "
+            "border-bottom: 2px dotted rgba(60, 120, 180, 128); "
+            "border-radius: 3px; margin: 1px 0;"
         )
 
     def mousePressEvent(self, event):
@@ -231,43 +234,29 @@ class TimeSeriesWidget(QWidget):
         select_all_btn.setToolTip('Set region to cover all loaded data')
         controls_layout.addWidget(select_all_btn)
 
-        controls_layout.addSpacing(20)
-
-        controls_layout.addWidget(QLabel('Play Channel:'))
-        self.channel_combo = QComboBox()
-        self.channel_combo.setToolTip('Select which channel to play')
-        self.channel_combo.setMaximumWidth(120)
-        controls_layout.addWidget(self.channel_combo)
-
-        self.play_button = QPushButton('▶ Play Segment')
-        self.play_button.clicked.connect(self.play_selected_segment)
-        self.play_button.setToolTip('Play the highlighted region as audio')
-        self.play_button.setMaximumWidth(140)
-        controls_layout.addWidget(self.play_button)
-
-        self.stop_button = QPushButton('⏹ Stop Playback')
-        self.stop_button.clicked.connect(self.stop_playback)
-        self.stop_button.setToolTip('Stop audio playback')
-        self.stop_button.setMaximumWidth(140)
-        self.stop_button.setEnabled(False)
-        controls_layout.addWidget(self.stop_button)
-
         controls_layout.addStretch()
 
-        create_annotation_btn = QPushButton('Create Annotation from Region')
-        create_annotation_btn.clicked.connect(self.create_annotation_from_region)
-        controls_layout.addWidget(create_annotation_btn)
-
-        delete_selected_btn = QPushButton('Delete Selected Annotation')
-        delete_selected_btn.clicked.connect(self.delete_selected_annotation)
-        delete_selected_btn.setToolTip('Click an annotation to select it, then click this button to delete')
-        controls_layout.addWidget(delete_selected_btn)
-
-        clear_annotations_btn = QPushButton('Clear All Annotations')
-        clear_annotations_btn.clicked.connect(self.clear_all_annotations)
-        controls_layout.addWidget(clear_annotations_btn)
-
         main_layout.addLayout(controls_layout)
+
+    def create_playback_panel(self) -> QWidget:
+        """Create the left-sidebar audio playback controls."""
+        section = CollapsibleSection("Audio Playback")
+        section.add_widget(QLabel("Channel:"))
+        self.channel_combo = QComboBox()
+        self.channel_combo.setToolTip("Select which channel to play")
+        section.add_widget(self.channel_combo)
+
+        self.play_button = QPushButton("Play Segment")
+        self.play_button.clicked.connect(self.play_selected_segment)
+        self.play_button.setToolTip("Play the highlighted region as audio")
+        section.add_widget(self.play_button)
+
+        self.stop_button = QPushButton("Stop Playback")
+        self.stop_button.clicked.connect(self.stop_playback)
+        self.stop_button.setToolTip("Stop audio playback")
+        self.stop_button.setEnabled(False)
+        section.add_widget(self.stop_button)
+        return section
 
     def _next_box_name(self) -> str:
         self._box_counter += 1
@@ -323,14 +312,22 @@ class TimeSeriesWidget(QWidget):
     def _add_plot_box(self, box: PlotBox):
         self.plot_boxes.append(box)
         self._configure_box(box)
-        # Give each new box a concrete default height so the scroll area
-        # knows the total content size and can scroll when boxes overflow.
-        if not box.minimumHeight() or box.height() < 220:
-            box.setFixedHeight(220)
+        box.set_x_limits()
+        # Boxes start collapsed, so reserve only the header height until opened.
+        box.setFixedHeight(26)
         # Insert before the trailing stretch
         insert_pos = self._plots_layout.count() - 1
         self._plots_layout.insertWidget(insert_pos, box)
-        self._plots_layout.insertWidget(insert_pos + 1, _ResizeHandle(box))
+        resize_handle = _ResizeHandle(box)
+        resize_handle.setVisible(False)
+        box.collapsed_changed.connect(
+            lambda collapsed, handle=resize_handle: handle.setVisible(not collapsed)
+        )
+        box.time_domain_visibility_changed.connect(
+            lambda visible, handle=resize_handle, plot_box=box:
+            handle.setVisible(visible and plot_box._expanded)
+        )
+        self._plots_layout.insertWidget(insert_pos + 1, resize_handle)
 
     def remove_box(self, box: PlotBox):
         """Remove a single PlotBox and its associated ResizeHandle from the layout."""
