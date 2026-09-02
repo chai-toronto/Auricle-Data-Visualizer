@@ -67,7 +67,7 @@ class PlotBox(QWidget):
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('w')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_widget.setLabel('bottom', 'Time', units='s')
+        self.set_x_axis_label('time')
         self.plot_widget.setAntialiasing(True)
         self.plot_widget.setMinimumHeight(22)
         self.plot_widget.setMenuEnabled(False)
@@ -120,7 +120,17 @@ class PlotBox(QWidget):
             lo, hi = ranges[1]
             self._y_min_spin.blockSignals(True)
             self._y_max_spin.blockSignals(True)
+            print(
+                "FINAL Y RANGE",
+                self.box_name,
+                "range=", ranges[1],
+                "items=", [
+                    (type(item).__name__, getattr(item, "opts", {}).get("name"))
+                    for item in self.plot_widget.getPlotItem().items
+                ],
+            )            
             self._y_min_spin.setValue(lo)
+
             self._y_max_spin.setValue(hi)
             self._y_min_spin.blockSignals(False)
             self._y_max_spin.blockSignals(False)
@@ -151,6 +161,14 @@ class PlotBox(QWidget):
         layout.setSpacing(2)
         layout.addWidget(self.header_button)
         layout.addWidget(self._content)
+
+    def set_x_axis_label(self, timestamp_type: str):
+        axis = self.plot_widget.getAxis('bottom')
+        axis.enableAutoSIPrefix(False)
+        if timestamp_type == 'sample_index':
+            self.plot_widget.setLabel('bottom', 'Index')
+        else:
+            self.plot_widget.setLabel('bottom', 'Time', units='s')
 
     def _toggle_expanded(self):
         if self._expanded:
@@ -242,7 +260,7 @@ class PlotBox(QWidget):
             return
         if trace.get('hidden', False):
             return
-        channel_idx = trace['channel_idx']
+        channel_idx = trace['channel_idx']           
         if channel_idx < 0 or channel_idx >= sensor_data.n_channels:
             return
         if self.plot_type == 'scatter':
@@ -265,6 +283,7 @@ class PlotBox(QWidget):
             )
         plot_item.setClipToView(True)
         plot_item.setDownsampling(auto=True, method='peak')
+     
         self._plot_items[self._get_trace_key(trace['dataset_id'], channel_idx)] = plot_item
 
     def set_plot_type(self, plot_type: str):
@@ -331,6 +350,7 @@ class PlotBox(QWidget):
         for trace in self.traces:
             self._plot_trace(trace)
         self._update_axis_label()
+        self._refresh_title()
 
     def get_plot_widget(self) -> pg.PlotWidget:
         return self.plot_widget

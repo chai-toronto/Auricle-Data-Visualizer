@@ -105,6 +105,7 @@ def load_numpy(filepath: str) -> SensorData:
     
     timestamps = arr[:, 0]
     data = arr[:, 1:]
+
     
     # Infer sample rate
     if len(timestamps) > 1:
@@ -112,7 +113,10 @@ def load_numpy(filepath: str) -> SensorData:
         sample_rate = 1.0 / dt
     else:
         sample_rate = 1.0
-    
+
+    if arr.shape[1] > arr.shape[0]:
+        print("Warning: More channels than samples. Check data orientation.")
+
     return SensorData(
         timestamps=timestamps,
         data=data,

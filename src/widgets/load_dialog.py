@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QGroupBox,
@@ -22,6 +23,19 @@ class LoadDialog(QDialog):
 
         main_layout = QVBoxLayout(self)
         main_layout.addWidget(QLabel(f'Loaded file: {filename}'))
+
+        timestamp_type_group = QGroupBox('Timestamp Type:')
+        timestamp_type_layout = QHBoxLayout(timestamp_type_group)
+        self.sample_index_checkbox = QCheckBox('Sample index')
+        self.time_checkbox = QCheckBox('Time')
+        self.time_checkbox.setChecked(True)
+        self.timestamp_type_group = QButtonGroup(timestamp_type_group)
+        self.timestamp_type_group.setExclusive(True)
+        self.timestamp_type_group.addButton(self.sample_index_checkbox)
+        self.timestamp_type_group.addButton(self.time_checkbox)
+        timestamp_type_layout.addWidget(self.sample_index_checkbox)
+        timestamp_type_layout.addWidget(self.time_checkbox)
+        main_layout.addWidget(timestamp_type_group)
 
         self.new_box_radio = QRadioButton('Create new box')
         self.new_box_radio.setChecked(True)
@@ -93,9 +107,14 @@ class LoadDialog(QDialog):
                 'action': action,
                 'box_name': self.existing_box_combo.currentText(),
                 'layout': layout,
+                'timestamp_type': self._get_timestamp_type(),
             }
         layout = 'overlay' if self.new_options['overlay'].isChecked() else 'separate'
         return {
             'action': 'new',
             'layout': layout,
+            'timestamp_type': self._get_timestamp_type(),
         }
+
+    def _get_timestamp_type(self) -> str:
+        return 'sample_index' if self.sample_index_checkbox.isChecked() else 'time'

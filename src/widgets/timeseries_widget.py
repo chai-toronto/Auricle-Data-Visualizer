@@ -142,6 +142,7 @@ class TimeSeriesWidget(QWidget):
         self.plot_boxes: List[PlotBox] = []
         self.region_items: List[pg.LinearRegionItem] = []
         self._box_counter = 0
+        self.timestamp_type = 'time'
 
         self.annotations: List[Annotation] = []
         self.annotation_regions: Dict[Annotation, List[AnnotationRegion]] = {}
@@ -311,6 +312,7 @@ class TimeSeriesWidget(QWidget):
 
     def _add_plot_box(self, box: PlotBox):
         self.plot_boxes.append(box)
+        box.set_x_axis_label(self.timestamp_type)
         self._configure_box(box)
         box.set_x_limits()
         # Boxes start collapsed, so reserve only the header height until opened.
@@ -388,7 +390,17 @@ class TimeSeriesWidget(QWidget):
         self.add_dataset(dataset_id, sensor_data, 'separate', None)
         self._update_channel_combo_for_sensor_data(sensor_data)
 
-    def add_dataset(self, dataset_id: str, sensor_data: SensorData, layout: str, target_box_name: str | None):
+    def add_dataset(
+        self,
+        dataset_id: str,
+        sensor_data: SensorData,
+        layout: str,
+        target_box_name: str | None,
+        timestamp_type: str = 'time',
+    ):
+        self.timestamp_type = timestamp_type
+        for box in self.plot_boxes:
+            box.set_x_axis_label(timestamp_type)
         self.datasets[dataset_id] = sensor_data
         current_region = self.get_selected_region()
         new_boxes: List[PlotBox] = []
@@ -399,7 +411,7 @@ class TimeSeriesWidget(QWidget):
                 target_box = PlotBox(self._next_box_name(), self.datasets, self)
                 self._add_plot_box(target_box)
                 new_boxes.append(target_box)
-            for channel_idx in range(sensor_data.n_channels):
+            for channel_idx in range(sensor_data.n_channels):             
                 target_box.add_trace(dataset_id, channel_idx, self._default_trace_color(channel_idx), 1.0)
                 if target_box.get_stft_channel() is None:
                     target_box.set_stft_channel(dataset_id, channel_idx)
@@ -414,6 +426,14 @@ class TimeSeriesWidget(QWidget):
         else:
             for channel_idx in range(sensor_data.n_channels):
                 box = PlotBox(self._next_box_name(), self.datasets, self)
+                print(
+                "ADD TRACE",
+                    dataset_id,
+                    channel_idx,
+                    sensor_data.channel_names[channel_idx],
+                    sensor_data.data[:, channel_idx].min(),
+                    sensor_data.data[:, channel_idx].max(),
+                )                   
                 box.add_trace(dataset_id, channel_idx, self._default_trace_color(channel_idx), 1.0)
                 box.set_stft_channel(dataset_id, channel_idx)
                 self._add_plot_box(box)
@@ -433,7 +453,7 @@ class TimeSeriesWidget(QWidget):
         self._add_existing_annotations_to_boxes(new_boxes)
 
         for box in new_boxes:
-            box.get_plot_widget().autoRange()
+            box.get_plot_widget().autoRange(padding=0)
 
         self._update_channel_combo_for_sensor_data(sensor_data)
         self.on_view_range_changed()

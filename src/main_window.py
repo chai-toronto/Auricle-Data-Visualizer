@@ -190,11 +190,13 @@ class MainWindow(QMainWindow):
             self.spectrogram_widget.create_playback_panel()
         )
         spectrogram_sidebar_layout.addWidget(self.stft_panel)
+        # Keep collapsed sidebar sections compact and reserve extra height below them.
+        spectrogram_sidebar_layout.addStretch()
         self.fft_widget = FFTWidget()
 
         self.tab_widget.addTab(self.timeseries_widget, 'Time Series')
         self.tab_widget.addTab(self.spectrogram_widget, 'Spectrogram')
-        self.tab_widget.addTab(self.fft_widget, 'FFT')
+        self.tab_widget.addTab(self.fft_widget, 'Power Spectrum')
 
         self.data_mgmt_panel = DataMgmtPanel()
         self.data_mgmt_panel.load_data_requested.connect(self.open_file)
@@ -624,7 +626,7 @@ class MainWindow(QMainWindow):
             region = self.timeseries_widget.get_selected_region()
             if region:
                 new_box.set_region(*region)
-            new_box.get_plot_widget().autoRange()
+            new_box.get_plot_widget().autoRange(padding=0)
             self._refresh_fft_widget()
             self._refresh_spectrogram_widget()
             self.data_mgmt_panel.refresh(
@@ -1057,7 +1059,13 @@ class MainWindow(QMainWindow):
 
             self._set_busy(f"Finishing load of {os.path.basename(filename)}…")
             
-            self.timeseries_widget.add_dataset(dataset_id, sensor_data, result['layout'], target_box_name)
+            self.timeseries_widget.add_dataset(
+                dataset_id,
+                sensor_data,
+                result['layout'],
+                target_box_name,
+                result['timestamp_type'],
+            )
             self.datasets[dataset_id] = sensor_data
             self.sensor_data = sensor_data
 

@@ -10,3 +10,4 @@ utils/__pycache__/
 manipulations/__pycache__/
 widgets/__pycache__/
 *.pyc
+__pycache__/
