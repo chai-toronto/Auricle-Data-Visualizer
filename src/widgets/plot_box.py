@@ -68,6 +68,7 @@ class PlotBox(QWidget):
         self.plot_widget.setBackground('w')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.set_x_axis_label('time')
+        self.plot_widget.getAxis('left').enableAutoSIPrefix(False)
         self.plot_widget.setAntialiasing(True)
         self.plot_widget.setMinimumHeight(22)
         self.plot_widget.setMenuEnabled(False)
@@ -119,16 +120,7 @@ class PlotBox(QWidget):
         def _sync_y(vb, ranges):
             lo, hi = ranges[1]
             self._y_min_spin.blockSignals(True)
-            self._y_max_spin.blockSignals(True)
-            print(
-                "FINAL Y RANGE",
-                self.box_name,
-                "range=", ranges[1],
-                "items=", [
-                    (type(item).__name__, getattr(item, "opts", {}).get("name"))
-                    for item in self.plot_widget.getPlotItem().items
-                ],
-            )            
+            self._y_max_spin.blockSignals(True)           
             self._y_min_spin.setValue(lo)
 
             self._y_max_spin.setValue(hi)

@@ -376,7 +376,6 @@ class SpectrogramWidget(QWidget):
     def set_x_range(self, x_min: float, x_max: float):
         """
         Set the x-axis range (time range) for all spectrogram plots.
-        Blocks signals to prevent recursion during programmatic updates.
         
         Args:
             x_min: Minimum time value
@@ -387,14 +386,21 @@ class SpectrogramWidget(QWidget):
         
         try:
             self.is_updating_range = True
-            
-            for plot_widget in self.plot_widgets:
-                view_box = plot_widget.getViewBox()
-                # Block signals during range update
-                view_box.sigRangeChanged.disconnect()
-                plot_widget.setXRange(x_min, x_max, padding=0)
-                # Reconnect signal
-                view_box.sigRangeChanged.connect(self.on_view_range_changed)
+
+            # on_view_range_changed already early-returns while this flag is
+            # set, so the range is applied without dropping signal connections
+            # (a blanket disconnect also removed the y-spinbox sync handlers).
+            # X-linked views rescale each other by pixel width, so block the
+            # links and give every plot exactly the requested range.
+            view_boxes = [plot_widget.getViewBox() for plot_widget in self.plot_widgets]
+            for view_box in view_boxes:
+                view_box.blockLink(True)
+            try:
+                for view_box in view_boxes:
+                    view_box.setXRange(x_min, x_max, padding=0)
+            finally:
+                for view_box in view_boxes:
+                    view_box.blockLink(False)
         finally:
             self.is_updating_range = False
     
@@ -448,6 +454,26 @@ class SpectrogramWidget(QWidget):
         self.update_inputs_from_region()
         self.region_changed.emit(start, end)
 
+    def _display_decimals(self) -> int:
+        """Decimals for the region inputs, scaled to the data span."""
+        if self.sensor_data is None or len(self.sensor_data.timestamps) == 0:
+            return 3
+        span = float(self.sensor_data.timestamps[-1]) - float(self.sensor_data.timestamps[0])
+        if not np.isfinite(span) or span <= 0:
+            return 3
+        return int(np.clip(4 - np.floor(np.log10(span)), 3, 12))
+
+    def _format_axis_value(self, value: float) -> str:
+        return f"{value:.{self._display_decimals()}f}"
+
+    def _sample_interval(self) -> float:
+        """Average sample spacing of the loaded data."""
+        if self.sensor_data is None or len(self.sensor_data.timestamps) < 2:
+            return 0.0
+        timestamps = self.sensor_data.timestamps
+        span = abs(float(timestamps[-1]) - float(timestamps[0]))
+        return span / (len(timestamps) - 1) if span > 0 else 0.0
+
     def update_inputs_from_region(self):
         """Update input fields from current region."""
         if not self.region_items:
@@ -455,8 +481,8 @@ class SpectrogramWidget(QWidget):
         
         plot_widget, region_item = self.region_items[0]
         start, end = region_item.getRegion()
-        self.start_edit.setText(f"{start:.3f}")
-        self.end_edit.setText(f"{end:.3f}")
+        self.start_edit.setText(self._format_axis_value(start))
+        self.end_edit.setText(self._format_axis_value(end))
     
     def update_region_from_inputs(self):
         """Update region from input field values."""
@@ -483,16 +509,30 @@ class SpectrogramWidget(QWidget):
         try:
             start = float(self.start_edit.text())
             end = float(self.end_edit.text())
-            
-            # Normalize so start <= end
-            start, end = normalize_region(start, end)
-            
-            # Set x-range on this spectrogram widget
-            self.set_x_range(start, end)
-            
         except ValueError:
-            # Invalid input, ignore
-            pass
+            return
+
+        start, end = normalize_region(start, end)
+
+        # Prefer the exact region bounds when the inputs are still just a
+        # rounded view of them, so the jump is not quantized by the display.
+        if self.region_items:
+            region_start, region_end = normalize_region(*self.region_items[0][1].getRegion())
+            if (
+                self.start_edit.text() == self._format_axis_value(region_start)
+                and self.end_edit.text() == self._format_axis_value(region_end)
+            ):
+                start, end = float(region_start), float(region_end)
+
+        # A zero-width range makes pyqtgraph re-centre the previous window
+        # instead of zooming to the selection.
+        minimum_width = self._sample_interval()
+        if end - start < minimum_width:
+            centre = (start + end) * 0.5
+            start = centre - minimum_width * 0.5
+            end = centre + minimum_width * 0.5
+
+        self.set_x_range(start, end)
     
     def clear_plots(self):
         """Clear all existing plots."""
@@ -1170,8 +1210,8 @@ class SpectrogramWidget(QWidget):
                 other_region.blockSignals(False)
         
         # Update input fields
-        self.start_edit.setText(f"{start:.3f}")
-        self.end_edit.setText(f"{end:.3f}")
+        self.start_edit.setText(self._format_axis_value(start))
+        self.end_edit.setText(self._format_axis_value(end))
         
         # Emit signal to notify main window so timeseries can update
         self.region_changed.emit(start, end)

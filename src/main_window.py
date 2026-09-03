@@ -1056,6 +1056,14 @@ class MainWindow(QMainWindow):
             result = dialog.get_result()
             dataset_id = self._make_dataset_id(filename)
             target_box_name = result.get('box_name') if result['action'] == 'existing' else None
+            use_sample_index = result['timestamp_type'] == 'sample_index'
+
+            if use_sample_index:
+                # x-axis is a sample index: force unit spacing and a 1.0 sample
+                # rate, and leave frequency-domain views off by default since
+                # there is no meaningful sampling rate to interpret them with.
+                sensor_data.use_sample_index_axis()
+                sensor_data.spectrogram_enabled = [False] * len(sensor_data.channel_names)
 
             self._set_busy(f"Finishing load of {os.path.basename(filename)}…")
             
@@ -1069,11 +1077,17 @@ class MainWindow(QMainWindow):
             self.datasets[dataset_id] = sensor_data
             self.sensor_data = sensor_data
 
-            info_msg = (f'Loaded: {sensor_data.filename} | '
-                        f'{sensor_data.n_samples:,} samples | '
-                        f'{sensor_data.n_channels} channels | '
-                        f'{sensor_data.duration:.2f}s | '
-                        f'{sensor_data.sample_rate:.1f} Hz')
+            if use_sample_index:
+                info_msg = (f'Loaded: {sensor_data.filename} | '
+                            f'{sensor_data.n_samples:,} samples | '
+                            f'{sensor_data.n_channels} channels | '
+                            f'sample-index axis (FFT/STFT disabled)')
+            else:
+                info_msg = (f'Loaded: {sensor_data.filename} | '
+                            f'{sensor_data.n_samples:,} samples | '
+                            f'{sensor_data.n_channels} channels | '
+                            f'{sensor_data.duration:.2f}s | '
+                            f'{sensor_data.sample_rate:.1f} Hz')
             self.statusBar().showMessage(info_msg)
 
             self.fft_panel.update_channel_list(sensor_data.channel_names)

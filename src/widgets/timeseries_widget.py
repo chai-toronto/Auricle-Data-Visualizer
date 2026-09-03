@@ -426,14 +426,7 @@ class TimeSeriesWidget(QWidget):
         else:
             for channel_idx in range(sensor_data.n_channels):
                 box = PlotBox(self._next_box_name(), self.datasets, self)
-                print(
-                "ADD TRACE",
-                    dataset_id,
-                    channel_idx,
-                    sensor_data.channel_names[channel_idx],
-                    sensor_data.data[:, channel_idx].min(),
-                    sensor_data.data[:, channel_idx].max(),
-                )                   
+                  
                 box.add_trace(dataset_id, channel_idx, self._default_trace_color(channel_idx), 1.0)
                 box.set_stft_channel(dataset_id, channel_idx)
                 self._add_plot_box(box)
@@ -441,6 +434,12 @@ class TimeSeriesWidget(QWidget):
 
         self._relink_x_axes()
         self._refresh_region_items()
+
+        if timestamp_type == 'sample_index':
+            # No meaningful sampling rate, so the FFT view is off by default.
+            # It stays re-enablable per box from the Channels panel.
+            for box in new_boxes:
+                box.set_show_fft(False)
 
         if current_region is not None:
             start, end = current_region
@@ -496,8 +495,8 @@ class TimeSeriesWidget(QWidget):
                 region_item.blockSignals(True)
                 region_item.setRegion([start, end])
                 region_item.blockSignals(False)
-        self.start_edit.setText(f'{start:.3f}')
-        self.end_edit.setText(f'{end:.3f}')
+        self.start_edit.setText(self._format_axis_value(start))
+        self.end_edit.setText(self._format_axis_value(end))
         self.region_changed.emit(start, end)
 
     def on_view_range_changed(self, *args):
@@ -507,12 +506,65 @@ class TimeSeriesWidget(QWidget):
         x_range = view_box.viewRange()[0]
         self.view_range_changed.emit(x_range[0], x_range[1])
 
+    def _data_bounds(self) -> Optional[Tuple[float, float]]:
+        """Return (min, max) of the x-axis across all loaded datasets."""
+        starts: List[float] = []
+        ends: List[float] = []
+        for data in self.datasets.values():
+            timestamps = getattr(data, 'timestamps', None)
+            if timestamps is None or len(timestamps) == 0:
+                continue
+            starts.append(float(timestamps[0]))
+            ends.append(float(timestamps[-1]))
+        if not starts:
+            return None
+        return min(starts), max(ends)
+
+    def _sample_interval(self) -> float:
+        """Smallest average sample spacing across all loaded datasets."""
+        steps: List[float] = []
+        for data in self.datasets.values():
+            timestamps = getattr(data, 'timestamps', None)
+            if timestamps is None or len(timestamps) < 2:
+                continue
+            span = abs(float(timestamps[-1]) - float(timestamps[0]))
+            if span > 0:
+                steps.append(span / (len(timestamps) - 1))
+        return min(steps) if steps else 0.0
+
+    def _display_decimals(self) -> int:
+        """
+        Decimals for the region inputs, scaled to the data span.
+
+        A fixed 3 decimals silently quantizes the region to 1ms, which destroys
+        the selection on short or fast records (a 400-sample record at 51.2kHz
+        spans under 8ms in total).
+        """
+        bounds = self._data_bounds()
+        if bounds is None:
+            return 3
+        span = bounds[1] - bounds[0]
+        if not np.isfinite(span) or span <= 0:
+            return 3
+        return int(np.clip(4 - np.floor(np.log10(span)), 3, 12))
+
+    def _format_axis_value(self, value: float) -> str:
+        return f'{value:.{self._display_decimals()}f}'
+
+    def _show_status(self, message: str, timeout: int = 2000):
+        try:
+            main_window = self.window()
+            if main_window is not None and hasattr(main_window, 'statusBar'):
+                main_window.statusBar().showMessage(message, timeout)
+        except Exception:
+            pass
+
     def update_inputs_from_region(self):
         if not self.region_items:
             return
         start, end = self.region_items[0].getRegion()
-        self.start_edit.setText(f'{start:.3f}')
-        self.end_edit.setText(f'{end:.3f}')
+        self.start_edit.setText(self._format_axis_value(start))
+        self.end_edit.setText(self._format_axis_value(end))
 
     def update_region_from_inputs(self):
         if not self.region_items:
@@ -550,22 +602,65 @@ class TimeSeriesWidget(QWidget):
         self.update_inputs_from_region()
         self.region_changed.emit(start, end)
 
-    def jump_to_range(self):
+    def _requested_jump_range(self) -> Optional[Tuple[float, float]]:
+        """
+        Resolve the range the user wants to jump to.
+
+        The line edits are only a rounded view of the selection, so when they
+        still match the current region they are ignored in favour of the exact
+        region bounds. Typed values take precedence over the region.
+        """
         try:
             start = float(self.start_edit.text())
             end = float(self.end_edit.text())
-            start, end = normalize_region(start, end)
-            self.set_x_range(start, end)
-            main_window = self.window()
-            if main_window and hasattr(main_window, 'spectrogram_widget'):
-                main_window.spectrogram_widget.set_x_range(start, end)
         except ValueError:
-            try:
-                main_window = self.window()
-                if main_window and hasattr(main_window, 'statusBar'):
-                    main_window.statusBar().showMessage('? Invalid time values for jump', 2000)
-            except Exception:
-                pass
+            return None
+
+        region = self.get_selected_region()
+        if region is not None:
+            region_start, region_end = normalize_region(float(region[0]), float(region[1]))
+            if (
+                self.start_edit.text() == self._format_axis_value(region_start)
+                and self.end_edit.text() == self._format_axis_value(region_end)
+            ):
+                return region_start, region_end
+
+        return normalize_region(start, end)
+
+    def jump_to_range(self):
+        target = self._requested_jump_range()
+        if target is None:
+            self._show_status('Invalid time values for jump')
+            return
+
+        start, end = target
+        bounds = self._data_bounds()
+        if bounds is not None and (end < bounds[0] or start > bounds[1]):
+            self._show_status(
+                f'Jump target {start:g} to {end:g} is outside the data range '
+                f'{bounds[0]:g} to {bounds[1]:g}'
+            )
+            return
+
+        # A zero-width request makes pyqtgraph keep the previous window width
+        # and simply re-centre it, which reads as "jumped half a window" or,
+        # once the axis limits clamp it, as "did nothing".
+        minimum_width = self._sample_interval()
+        if end - start < minimum_width:
+            centre = (start + end) * 0.5
+            start = centre - minimum_width * 0.5
+            end = centre + minimum_width * 0.5
+
+        if bounds is not None:
+            start = max(start, bounds[0])
+            end = min(end, bounds[1])
+            if end <= start:
+                start, end = bounds
+
+        self.set_x_range(start, end)
+        main_window = self.window()
+        if main_window and hasattr(main_window, 'spectrogram_widget'):
+            main_window.spectrogram_widget.set_x_range(start, end)
 
     def get_selected_region(self):
         if not self.region_items:
@@ -582,8 +677,20 @@ class TimeSeriesWidget(QWidget):
     def set_x_range(self, x_min: float, x_max: float):
         self.is_updating_range = True
         try:
-            for box in self.plot_boxes:
-                box.get_plot_widget().setXRange(x_min, x_max, padding=0)
+            view_boxes = [box.get_plot_widget().getViewBox() for box in self.plot_boxes]
+            # X-linked views realign each other from pixel geometry: a linked
+            # view ends up showing requested_width * (its_width / source_width).
+            # Boxes differ in width whenever one is collapsed or has wider y
+            # tick labels, so applying the range box-by-box lets the last box
+            # rescale all the others. Block the links and set each box directly.
+            for view_box in view_boxes:
+                view_box.blockLink(True)
+            try:
+                for view_box in view_boxes:
+                    view_box.setXRange(x_min, x_max, padding=0)
+            finally:
+                for view_box in view_boxes:
+                    view_box.blockLink(False)
         finally:
             self.is_updating_range = False
 
@@ -809,7 +916,7 @@ class TimeSeriesWidget(QWidget):
                 else:
                     view_box.setYRange(y_min_global - 1, y_max_global + 1, padding=0)
             else:
-                view_box.autoRange(padding=0.02)
+                view_box.autoRange(padding=0)
             view_box.setXRange(x_min, x_max, padding=0)
 
     def play_selected_segment(self):

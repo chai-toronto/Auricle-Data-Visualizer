@@ -58,6 +58,19 @@ class SensorData:
         """Duration in seconds."""
         return self.timestamps[-1] - self.timestamps[0]
     
+    def use_sample_index_axis(self):
+        """
+        Reinterpret the x-axis as a sample index rather than a time axis.
+
+        The first column of the source file is still consumed as the x-axis, but
+        its values are replaced by 0..n_samples-1 so consecutive samples are
+        exactly one unit apart. The sample rate becomes 1.0, which makes any
+        frequency derived from it a normalized frequency (cycles per sample).
+        """
+        n = len(self.timestamps)
+        self.timestamps = np.arange(n, dtype=float)
+        self.sample_rate = 1.0
+
     def get_channel(self, channel_idx: int) -> np.ndarray:
         """Get data for a specific channel."""
         return self.data[:, channel_idx]

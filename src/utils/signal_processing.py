@@ -19,11 +19,16 @@ def compute_fft(data: np.ndarray, sample_rate: float, nperseg: int = 256, window
     Returns:
         Tuple of (frequencies, magnitudes)
     """
+    # Clamp the segment length to the available data. Otherwise scipy silently
+    # falls back to nperseg=len(data) with a UserWarning, which also changes the
+    # number of frequency bins between channels/selections of differing length.
+    effective_nperseg = max(1, min(int(nperseg), len(data)))
+
     # Use Welch's method for FFT with windowing
     frequencies, magnitudes = signal.welch(
         data,
         fs=sample_rate,
-        nperseg=nperseg,
+        nperseg=effective_nperseg,
         window=window
     )
     
@@ -53,16 +58,20 @@ def compute_stft(
         - frequencies: Frequency values
         - spectrogram: 2D array of shape (n_frequencies, n_times) with magnitude values
     """
+    # Clamp the window to the available data so scipy does not fall back with a
+    # warning on short selections.
+    effective_window = max(1, min(int(window_size), len(data)))
+
     # Calculate hop length from overlap
-    hop_length = int(window_size * (1 - overlap))
+    hop_length = max(1, int(effective_window * (1 - overlap)))
     
     # Compute STFT
     f, t, Zxx = signal.stft(
         data,
         fs=sample_rate,
         window=window_type,
-        nperseg=window_size,
-        noverlap=window_size - hop_length
+        nperseg=effective_window,
+        noverlap=effective_window - hop_length
     )
     
     # Get magnitude (absolute value)
